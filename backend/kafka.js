@@ -1,0 +1,36 @@
+const { Kafka } = require('kafkajs');
+
+async function createKafkaClient() {
+    return new Kafka({
+        clientId: 'my-app',
+        brokers: ['localhost:9092'],
+    });
+}
+
+async function produceMessage(kafka, topic, message) {
+    const producer = kafka.producer();
+    await producer.connect();
+    await producer.send({
+        topic: topic,
+        messages: [{ value: message }],
+    });
+    await producer.disconnect();
+}
+
+async function consumeMessages(kafka, topic, groupId, onMessage) {
+    const consumer = kafka.consumer({ groupId: groupId });
+    await consumer.connect();
+    await consumer.subscribe({ topic: topic, fromBeginning: true });
+
+    await consumer.run({
+        eachMessage: async ({ topic, partition, message }) => {
+            onMessage(message.value.toString());
+        },
+    });
+}
+
+module.exports = {
+    createKafkaClient,
+    produceMessage,
+    consumeMessages,
+};

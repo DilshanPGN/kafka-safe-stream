@@ -3,21 +3,34 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Load Config</title>
+    <title>Kafka UI</title>
 </head>
 <body>
-    <h4>Config load:</h4>
-    <textarea id="output" spellcheck="false"></textarea>
-    <script>
-        const { ipcRenderer } = require('electron');
+<h4>Insert Payload:</h4>
+<textarea id="payload" spellcheck="false"></textarea>
+<button id="produceButton">Produce Payload</button>
 
-        ipcRenderer.on('config-data', (event, data) => {
-            document.getElementById('output').value = data;
-        });
+<h4>Consumed Messages:</h4>
+<textarea id="consumedMessages" spellcheck="false" readonly></textarea>
+<button id="consumeButton">Start Consuming</button>
 
-        window.onload = () => {
-            ipcRenderer.send('load-config');
-        };
-    </script>
+<script>
+    const { ipcRenderer } = require('electron');
+
+    document.getElementById('produceButton').addEventListener('click', () => {
+        const payload = document.getElementById('payload').value;
+        ipcRenderer.send('produce-payload', payload);
+    });
+
+    document.getElementById('consumeButton').addEventListener('click', () => {
+        ipcRenderer.send('start-consuming');
+    });
+
+    ipcRenderer.on('consumed-message', (event, message) => {
+        const consumedMessages = document.getElementById('consumedMessages');
+        consumedMessages.value += message + '\n';
+    });
+</script>
+<script src="backend/kafka.js"></script>
 </body>
 </html>
