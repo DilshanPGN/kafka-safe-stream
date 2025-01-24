@@ -25,14 +25,18 @@ async function produceMessage(kafka, topic, message) {
 
 async function consumeMessages(kafka, topic, groupId, onMessage) {
     consumer = kafka.consumer({ groupId: groupId });
-    await consumer.connect();
-    await consumer.subscribe({ topic: topic, fromBeginning: true });
+    try {
+        await consumer.connect();
+        await consumer.subscribe({ topic: topic, fromBeginning: true });
 
-    await consumer.run({
-        eachMessage: async ({ topic, partition, message }) => {
-            onMessage(message.value.toString());
-        },
-    });
+        await consumer.run({
+            eachMessage: async ({ topic, partition, message }) => {
+                onMessage(message.value.toString());
+            },
+        });
+    } catch (error) {
+        throw new Error('Failed to connect to Kafka: ' + error.message);
+    }
 }
 
 async function stopConsuming() {

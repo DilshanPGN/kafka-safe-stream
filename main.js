@@ -33,10 +33,14 @@ ipcMain.on('produce-payload', async (event, payload) => {
 });
 
 ipcMain.on('start-consuming', async (event) => {
-    const kafka = await createKafkaClient();
-    await consumeMessages(kafka, 'alm-kafka-demo-topic', 'test-group', (message) => {
-        mainWindow.webContents.send('consumed-message', message);
-    });
+    try {
+        const kafka = await createKafkaClient();
+        await consumeMessages(kafka, 'alm-kafka-demo-topic', 'test-group', (message) => {
+            mainWindow.webContents.send('consumed-message', message);
+        });
+    } catch (error) {
+        event.sender.send('consume-error', error.message);
+    }
 });
 
 ipcMain.on('stop-consuming', async (event) => {

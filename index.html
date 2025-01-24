@@ -32,6 +32,10 @@
         ipcRenderer.send('start-consuming');
     });
 
+    ipcRenderer.on('consume-error', (event, errorMessage) => {
+        alert('Error: ' + errorMessage);
+    });
+
     document.getElementById('stopConsumeButton').addEventListener('click', () => {
         ipcRenderer.send('stop-consuming');
     });
