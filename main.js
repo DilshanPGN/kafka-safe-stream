@@ -24,8 +24,12 @@ function createWindow() {
 app.on('ready', createWindow);
 
 ipcMain.on('produce-payload', async (event, payload) => {
-    const kafka = await createKafkaClient();
-    await produceMessage(kafka, 'alm-kafka-demo-topic', payload);
+    try {
+        const kafka = await createKafkaClient();
+        await produceMessage(kafka, 'alm-kafka-demo-topic', payload);
+    } catch (error) {
+        event.sender.send('produce-error', error.message);
+    }
 });
 
 ipcMain.on('start-consuming', async (event) => {

@@ -10,12 +10,17 @@ async function createKafkaClient() {
 
 async function produceMessage(kafka, topic, message) {
     const producer = kafka.producer();
-    await producer.connect();
-    await producer.send({
-        topic: topic,
-        messages: [{ value: message }],
-    });
-    await producer.disconnect();
+    try {
+        await producer.connect();
+        await producer.send({
+            topic: topic,
+            messages: [{ value: message }],
+        });
+    } catch (error) {
+        throw new Error('Failed to connect to Kafka: ' + error.message);
+    } finally {
+        await producer.disconnect();
+    }
 }
 
 async function consumeMessages(kafka, topic, groupId, onMessage) {

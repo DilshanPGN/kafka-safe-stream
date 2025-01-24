@@ -24,6 +24,10 @@
         ipcRenderer.send('produce-payload', payload);
     });
 
+    ipcRenderer.on('produce-error', (event, errorMessage) => {
+        alert('Error: ' + errorMessage);
+    });
+
     document.getElementById('consumeButton').addEventListener('click', () => {
         ipcRenderer.send('start-consuming');
     });
