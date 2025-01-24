@@ -1,4 +1,5 @@
 const { Kafka } = require('kafkajs');
+let consumer;
 
 async function createKafkaClient() {
     return new Kafka({
@@ -18,7 +19,7 @@ async function produceMessage(kafka, topic, message) {
 }
 
 async function consumeMessages(kafka, topic, groupId, onMessage) {
-    const consumer = kafka.consumer({ groupId: groupId });
+    consumer = kafka.consumer({ groupId: groupId });
     await consumer.connect();
     await consumer.subscribe({ topic: topic, fromBeginning: true });
 
@@ -29,8 +30,16 @@ async function consumeMessages(kafka, topic, groupId, onMessage) {
     });
 }
 
+async function stopConsuming() {
+    if (consumer) {
+        await consumer.disconnect();
+        consumer = null;
+    }
+}
+
 module.exports = {
     createKafkaClient,
     produceMessage,
     consumeMessages,
+    stopConsuming,
 };

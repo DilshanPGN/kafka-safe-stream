@@ -13,6 +13,8 @@
 <h4>Consumed Messages:</h4>
 <textarea id="consumedMessages" spellcheck="false" readonly></textarea>
 <button id="consumeButton">Start Consuming</button>
+<button id="stopConsumeButton">Stop Consuming</button>
+<button id="clearMessages">Clear Messages</button>
 
 <script>
     const { ipcRenderer } = require('electron');
@@ -24,6 +26,15 @@
 
     document.getElementById('consumeButton').addEventListener('click', () => {
         ipcRenderer.send('start-consuming');
+    });
+
+    document.getElementById('stopConsumeButton').addEventListener('click', () => {
+        ipcRenderer.send('stop-consuming');
+    });
+
+    document.getElementById('clearMessages').addEventListener('click', () => {
+        const consumedMessages = document.getElementById('consumedMessages');
+        consumedMessages.value = '';
     });
 
     ipcRenderer.on('consumed-message', (event, message) => {
