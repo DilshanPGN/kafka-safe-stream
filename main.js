@@ -1,39 +1,28 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
-const path = require('path');
-const fs = require('fs');
+const { app, BrowserWindow } = require('electron');
 
 function createWindow() {
     const win = new BrowserWindow({
+        width: 800,
+        height: 600,
         webPreferences: {
             nodeIntegration: true,
-            contextIsolation: false
-        }
+        },
     });
 
     win.loadFile('index.html');
+    win.webContents.openDevTools(); // Open DevTools to see renderer process logs
+
+    console.log('Main process: Window created');
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+    createWindow();
 
-ipcMain.on('load-config', (event) => {
-    const configPath = path.join(__dirname, '.config');
-    fs.readFile(configPath, 'utf8', (err, data) => {
-        if (err) {
-            console.error('Error reading the config file:', err);
-            return;
-        }
-        event.sender.send('config-data', data);
+    app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
 });
 
 app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-        app.quit();
-    }
-});
-
-app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-    }
+    if (process.platform !== 'darwin') app.quit();
 });
