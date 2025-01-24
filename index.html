@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Load Config</title>
+</head>
+<body>
+    <textarea id="output"></textarea>
+    <script>
+        const { ipcRenderer } = require('electron');
+
+        ipcRenderer.on('config-data', (event, data) => {
+            document.getElementById('output').value = data;
+        });
+
+        window.onload = () => {
+            ipcRenderer.send('load-config');
+        };
+    </script>
+</body>
+</html>
