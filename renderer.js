@@ -1,20 +1,19 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
-
+const { createKafkaClient, produceMessage, stopConsuming, consumeMessages } = require("./backend/kafka");
 
 let envConfig = {
     "dev": {
         "id": "dev",
         "label": "DEV",
-        "brokers": "ip-te-kfkbd01.aws.wiley.com:9092,ip-te-kfkbd02.aws.wiley.com:9092,ip-te-kfkbd03.aws.wiley.com:9092",
+        "brokers": ["localhost:9092"],
         "topicList": [
-            "dev-abc",
+            "test.topic",
             "dev-xyz"
         ]
     },
     "qa": {
         "id": "qa",
         "label": "QA",
-        "brokers": "ip-te-kfkbq01.aws.wiley.com:9092,ip-te-kfkbq02.aws.wiley.com:9092,ip-te-kfkbq03.aws.wiley.com:9092",
+        "brokers": ["localhost:9092"],
         "topicList": [
             "qa-abc",
             "qa-xyz"
@@ -40,8 +39,8 @@ let activeEnv = 'dev';
 let activeMethod = 'producer';
 let activeTopicList = envConfig[activeEnv].topicList;
 let activeTopic = '';
-
-
+const kafkaSafeStreamGroup = 'kafka-safe-stream-group';
+let consumeStarted = false;
 
 // ipcMain.on('load-config', (event) => {
 //     const configPath = path.join(__dirname, '.config');
@@ -65,10 +64,7 @@ let activeTopic = '';
 // });
 
 
-
-
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('DOM loaded');
     showLoading();
     const buttonContainer = document.getElementById('sidebar');
     Object.values(envConfig).forEach(env => {
@@ -87,11 +83,65 @@ document.addEventListener('DOMContentLoaded', () => {
 
     onEnvBtnClick(document.getElementById(activeEnv));
 
+    const consumedMessages = document.getElementById('consumedMessages');
+
+    document.getElementById('produceButton').addEventListener('click', async () => {
+        showLoading();
+        const payload = document.getElementById('payload').value;
+        try {
+            const kafka = await createKafkaClient("my-app", envConfig[activeEnv].brokers);
+            await produceMessage(kafka, activeTopic, payload);
+        } catch (error) {
+            console.error(error);
+        }
+        hideLoading();
+    });
+
+    document.getElementById('clearMessages').addEventListener('click', () => {
+        const consumedMessages = document.getElementById('consumedMessages');
+        consumedMessages.value = '';
+    });
+
+    document.getElementById('consumeButton').addEventListener('click', async () => {
+        showLoading();
+
+        if (!consumeStarted) {
+            try {
+                const kafka = await createKafkaClient("my-app", envConfig[activeEnv].brokers);
+                await consumeMessages(kafka, activeTopic, kafkaSafeStreamGroup, (message) => {
+                    consumedMessages.value += message + '\n';
+                }).then(() => {
+                    hideLoading();
+                });
+                let consumeBtn = document.getElementById('consumeButton');
+                consumeBtn.innerHTML = 'Stop Consuming';
+                consumeBtn.style.backgroundColor = '#dc3545';
+                consumeStarted = true;
+            } catch (error) {
+                console.error(error);
+                hideLoading();
+            }
+        } else {
+            await stopConsuming().then(() => {
+                hideLoading();
+            });
+            let consumeBtn = document.getElementById('consumeButton');
+            consumeBtn.innerHTML = 'Start Consuming';
+            consumeBtn.style.backgroundColor = '#007bff';
+            consumeStarted = false;
+        }
+
+    });
+
     hideLoading();
 });
 
-
-
+async function reloadConsumerProducerButtons() {
+    const produceButton = document.getElementById('produceButton');
+    produceButton.disabled = activeTopic === '';
+    consumeStarted = false;
+    await stopConsuming();
+}
 
 const onEnvBtnClick = (btn) => {
     showLoading();
@@ -101,6 +151,8 @@ const onEnvBtnClick = (btn) => {
     activeEnv = btn.id;
     activeTopicList = envConfig[activeEnv].topicList;
     activeTopic = '';
+    const stopConsumeButton = document.getElementById('consumeButton');
+    stopConsumeButton.disabled = true;
     activeMethod = 'producer';
 
     const topicContainer = document.querySelector('#main #content #topics');
@@ -112,14 +164,20 @@ const onEnvBtnClick = (btn) => {
     activeTopicList.forEach(topic => {
         buildTopicButton(topicContainer, topic);
     });
+
+    reloadConsumerProducerButtons();
+
     hideLoading();
 }
-
 
 const onTopicBtnClick = (btn) => {
     showLoading();
     document.querySelectorAll('#main #content #topics button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+    activeTopic = btn.id;
+    const stopConsumeButton = document.getElementById('consumeButton');
+    stopConsumeButton.disabled = false;
+    reloadConsumerProducerButtons();
     hideLoading();
 }
 
@@ -132,10 +190,6 @@ const onMethodTabClick = (tab) => {
         document.getElementById(method.containerId).style.display = method.id === tab.id ? 'flex' : 'none';
     });
 }
-
-
-
-
 
 const buildEnvButton = (buttonContainer, env) => {
     const btn = document.createElement('button');
@@ -160,7 +214,6 @@ const buildMethodTab = (methodTabContainer, method) => {
     methodTabContainer.appendChild(tab);
 }
 
-
 const buildTopicButton = (topicContainer, topic) => {
     const btn = document.createElement('button');
     btn.textContent = topic;
@@ -173,9 +226,11 @@ const buildTopicButton = (topicContainer, topic) => {
 }
 
 const showLoading = () => {
-    // document.getElementById('loading-container').style.display = 'flex';
+    console.log('show loading');
+    document.getElementById('loading-container').style.display = 'flex';
 }
 
 const hideLoading = () => {
+    console.log('stop loading');
     document.getElementById('loading-container').style.display = 'none';
 }

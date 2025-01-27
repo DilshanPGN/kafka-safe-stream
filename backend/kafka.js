@@ -3,7 +3,7 @@ let consumer;
 
 async function createKafkaClient(clientId, brokers) {
     return new Kafka({
-        clientId: 'my-app',
+        clientId: 'kafka-safe-stream-app',
         brokers: brokers,
     });
 }
