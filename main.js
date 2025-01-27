@@ -15,30 +15,13 @@ function createWindow() {
     });
 
     win.loadFile('index.html');
+    win.webContents.openDevTools(); // Open DevTools to see renderer process logs
+
+    console.log('Main process: Window created');
 }
 
 app.whenReady().then(createWindow);
 
-ipcMain.on('load-config', (event) => {
-    const configPath = path.join(__dirname, '.config');
-    fs.readFile(configPath, 'utf8', (err, config) => {
-        if (err) {
-            console.error('Error reading the config file:', err);
-            dialog.showErrorBox('File Read Error', 'Error reading the config file. Please check the file and try again.');
-            app.quit();
-            return;
-        }
-        try {
-            configJson = JSON.parse(config);
-            event.sender.send('config-data', configJson);
-        } catch (parseErr) {
-            console.error('Invalid JSON format:', parseErr);
-            dialog.showErrorBox('JSON Parse Error', 'Invalid JSON format in the config file. Please correct the file and try again.');
-            app.quit();
-            return;
-        }
-    });
-});
 
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {

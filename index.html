@@ -12,11 +12,42 @@
       content="default-src 'self'; script-src 'self'"
     />
     <title>Kafka Safe Stream</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="./renderer.js"></script>
     <script src="./index.js"></script>
 </head>
 <body>
-    <h4>brokers:</h4>
-    <textarea id="output" rows="10" cols="50"></textarea>
-    <div id="button-container"></div>
+  <div id="loading-container">
+      <span class="loader"></span>
+  </div>
+  <div id="container">
+      <div id="sidebar">
+      </div>
+      <div id="main">
+          <div id="tabs">
+          </div>
+          <div id="content">
+              <div id="topics">
+                  <h3>TOPICS</h3>
+              </div>
+              <div id="producerContainer">
+                  <textarea placeholder="Payload"></textarea>
+                  <div id="actions">
+                      <button>Format</button>
+                      <button>Save Payload</button>
+                      <button>PRODUCE TO TOPIC</button>
+                  </div>
+              </div>
+              <div id="consumerContainer">
+                  <textarea placeholder="Consume Messages"></textarea>
+                  <div id="actions">
+                      <button>Format</button>
+                      <button>Save Payload</button>
+                      <button>PRODUCE TO TOPIC</button>
+                  </div>
+              </div>
+          </div>
+      </div>
+  </div>
 </body>
 </html>
