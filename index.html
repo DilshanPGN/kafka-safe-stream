@@ -3,21 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Load Config</title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'"
+    />
+    <meta
+      http-equiv="X-Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'"
+    />
+    <title>Kafka Safe Stream</title>
+    <script src="./index.js"></script>
 </head>
 <body>
-    <h4>Config load:</h4>
-    <textarea id="output" spellcheck="false"></textarea>
-    <script>
-        const { ipcRenderer } = require('electron');
-
-        ipcRenderer.on('config-data', (event, data) => {
-            document.getElementById('output').value = data;
-        });
-
-        window.onload = () => {
-            ipcRenderer.send('load-config');
-        };
-    </script>
+    <h4>brokers:</h4>
+    <textarea id="output" rows="10" cols="50"></textarea>
+    <div id="button-container"></div>
 </body>
 </html>
