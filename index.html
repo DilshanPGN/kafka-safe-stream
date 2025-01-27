@@ -16,8 +16,9 @@
 <button id="stopConsumeButton">Stop Consuming</button>
 <button id="clearMessages">Clear Messages</button>
 
-<script>
+<script  type="module">
     const { ipcRenderer } = require('electron');
+    const { createKafkaClient, produceMessage, consumeMessages, stopConsuming } = require('./backend/kafka');
 
     document.getElementById('produceButton').addEventListener('click', () => {
         const payload = document.getElementById('payload').value;
@@ -45,10 +46,16 @@
         consumedMessages.value = '';
     });
 
-    ipcRenderer.on('consumed-message', (event, message) => {
-        const consumedMessages = document.getElementById('consumedMessages');
-        consumedMessages.value += message + '\n';
-    });
+    const consumedMessages = document.getElementById('consumedMessages');
+
+    try {
+        const kafka = await createKafkaClient();
+        await consumeMessages(kafka, 'test.topic', 'test-group', (message) => {
+            consumedMessages.value += message + '\n';
+        });
+    } catch (error) {
+        event.sender.send('consume-error', error.message);
+    }
 </script>
 <script src="backend/kafka.js"></script>
 </body>
