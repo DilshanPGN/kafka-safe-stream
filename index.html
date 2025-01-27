@@ -16,28 +16,24 @@
 <button id="stopConsumeButton">Stop Consuming</button>
 <button id="clearMessages">Clear Messages</button>
 
-<script>
+<script  type="module">
     const { ipcRenderer } = require('electron');
+    const { createKafkaClient, produceMessage, consumeMessages, stopConsuming } = require('./backend/kafka');
 
-    document.getElementById('produceButton').addEventListener('click', () => {
+    const consumedMessages = document.getElementById('consumedMessages');
+
+    document.getElementById('produceButton').addEventListener('click', async () => {
         const payload = document.getElementById('payload').value;
-        ipcRenderer.send('produce-payload', payload);
+        try {
+            const kafka = await createKafkaClient();
+            await produceMessage(kafka, 'alm-kafka-demo-topic', payload);
+        } catch (error) {
+            console.error(error);
+        }
     });
 
-    ipcRenderer.on('produce-error', (event, errorMessage) => {
-        alert('Error: ' + errorMessage);
-    });
-
-    document.getElementById('consumeButton').addEventListener('click', () => {
-        ipcRenderer.send('start-consuming');
-    });
-
-    ipcRenderer.on('consume-error', (event, errorMessage) => {
-        alert('Error: ' + errorMessage);
-    });
-
-    document.getElementById('stopConsumeButton').addEventListener('click', () => {
-        ipcRenderer.send('stop-consuming');
+    document.getElementById('stopConsumeButton').addEventListener('click', async () => {
+        await stopConsuming();
     });
 
     document.getElementById('clearMessages').addEventListener('click', () => {
@@ -45,10 +41,17 @@
         consumedMessages.value = '';
     });
 
-    ipcRenderer.on('consumed-message', (event, message) => {
-        const consumedMessages = document.getElementById('consumedMessages');
-        consumedMessages.value += message + '\n';
+    document.getElementById('consumeButton').addEventListener('click', async () => {
+        try {
+            const kafka = await createKafkaClient();
+            await consumeMessages(kafka, 'alm-kafka-demo-topic', 'test-group', (message) => {
+                consumedMessages.value += message + '\n';
+            });
+        } catch (error) {
+            console.error(error);
+        }
     });
+
 </script>
 <script src="backend/kafka.js"></script>
 </body>
