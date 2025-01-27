@@ -15,7 +15,6 @@
     <link rel="stylesheet" href="styles.css">
     <script src="./renderer.js"></script>
     <script src="./index.js"></script>
-    <script src="./kafkaFunctions.js"></script>
 </head>
 <body>
   <div id="loading-container">
@@ -36,14 +35,13 @@
                   <div id="actions">
                       <button>Format</button>
                       <button>Save Payload</button>
-                      <button id="produceButton">PRODUCE TO TOPIC</button>
+                      <button id="produceButton" disabled>PRODUCE TO TOPIC</button>
                   </div>
               </div>
               <div id="consumerContainer">
                   <textarea id="consumedMessages" placeholder="Consume Messages"></textarea>
                   <div id="actions">
                       <button id="clearMessages">Clear</button>
-                      <button id="stopConsumeButton">Stop Consuming</button>
                       <button id="consumeButton">Start Consuming</button>
                   </div>
               </div>
