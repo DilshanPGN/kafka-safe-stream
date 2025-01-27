@@ -109,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const kafka = await createKafkaClient("my-app", envConfig[activeEnv].brokers);
                 await consumeMessages(kafka, activeTopic, kafkaSafeStreamGroup, (message) => {
-                    consumedMessages.value += message + '\n';
+                    consumedMessages.value += message + '\n\n\n';
                 }).then(() => {
                     hideLoading();
                 });
