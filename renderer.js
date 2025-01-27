@@ -7,7 +7,7 @@ let envConfig = {
         "brokers": ["localhost:9092"],
         "topicList": [
             "test.topic",
-            "dev-xyz"
+            "alm-kafka-demo-topic"
         ]
     },
     "qa": {
@@ -16,7 +16,7 @@ let envConfig = {
         "brokers": ["localhost:9092"],
         "topicList": [
             "qa-abc",
-            "qa-xyz"
+            "alm-kafka-demo-topic"
         ]
     }
 };
@@ -92,7 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const kafka = await createKafkaClient("my-app", envConfig[activeEnv].brokers);
             await produceMessage(kafka, activeTopic, payload);
         } catch (error) {
-            console.error(error);
+            showAlert("Kafka Producer Error" ,error.message);
         }
         hideLoading();
     });
@@ -118,8 +118,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 consumeBtn.style.backgroundColor = '#dc3545';
                 consumeStarted = true;
             } catch (error) {
-                console.error(error);
-                hideLoading();
+                showAlert("Kafka Consumer Error" ,error.message);
             }
         } else {
             await stopConsuming().then(() => {
@@ -234,3 +233,23 @@ const hideLoading = () => {
     console.log('stop loading');
     document.getElementById('loading-container').style.display = 'none';
 }
+
+
+
+function showAlert(topic, message) {
+    const alertBox = document.getElementById('custom-alert');
+    const alertTopic = document.getElementById('custom-alert-topic');
+    const alertMessage = document.getElementById('custom-alert-message');
+    alertTopic.textContent = topic;
+    alertMessage.textContent = message;
+    alertBox.style.display = 'block';
+}
+
+function closeAlert() {
+    const alertBox = document.getElementById('custom-alert');
+    alertBox.style.display = 'none';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelector('.custom-alert-close').addEventListener('click', closeAlert);
+});
