@@ -3,21 +3,60 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Load Config</title>
+    <meta
+    http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'"
+    />
+    <meta
+      http-equiv="X-Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'"
+    />
+    <link rel="stylesheet" href='codemirror/codemirror.css' rel='stylesheet'>
+    <link rel="stylesheet" href="codemirror/dracula.min.css">
+    <title>Kafka Safe Stream</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="./renderer.js"></script>
+    <script src='codemirror/codemirror.min.js'></script>
+    <script src='codemirror/javascript.min.js'></script>
+    <script src='codemirror/placeholder.min.js'></script>
 </head>
 <body>
-    <h4>Config load:</h4>
-    <textarea id="output" spellcheck="false"></textarea>
-    <script>
-        const { ipcRenderer } = require('electron');
-
-        ipcRenderer.on('config-data', (event, data) => {
-            document.getElementById('output').value = data;
-        });
-
-        window.onload = () => {
-            ipcRenderer.send('load-config');
-        };
-    </script>
+  <div id="loading-container">
+      <span class="loader"></span>
+  </div>
+  <div id="custom-alert" class="custom-alert">
+      <div class="custom-alert-content">
+          <span class="custom-alert-close">&times;</span>
+          <h3 id="custom-alert-topic"></h3>
+          <p id="custom-alert-message"></p>
+      </div>
+  </div>
+  <div id="container">
+      <div id="sidebar">
+      </div>
+      <div id="main">
+          <div id="tabs">
+          </div>
+          <div id="content">
+              <div id="topics">
+                  <h3>TOPICS</h3>
+              </div>
+              <div id="producerContainer">
+                  <div id="payload"></div>
+                  <div id="actions">
+                      <button id="formatButton" disabled>Format</button>
+                      <button id="produceButton" disabled>Produce to Topic</button>
+                  </div>
+              </div>
+              <div id="consumerContainer">
+                  <div id="consumedMessages"></div>
+                  <div id="actions">
+                      <button id="clearMessages">Clear</button>
+                      <button id="consumeButton">Start Consuming</button>
+                  </div>
+              </div>
+          </div>
+      </div>
+  </div>
 </body>
 </html>

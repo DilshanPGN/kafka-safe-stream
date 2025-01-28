@@ -1,0 +1,15 @@
+{
+    "appId": "com.dilshanpgn-uabeykoon-skaveesh.kafka-safe-stream",
+    "files": ["dist-electron", "dist-react"],
+    "icon": "./kss_logo.png",
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    },
+    "win": {
+      "target": ["portable", "msi"]
+    }
+  }
