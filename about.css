@@ -1,0 +1,37 @@
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background-color: #222;
+    color: #fff;
+}
+
+.content-group {
+    display: flex; 
+    align-items: center;
+    justify-content: center;
+    flex-direction: row;
+}
+
+.container {
+    justify-content: center;
+    display: flex;
+    margin-top: 50px;
+    margin-bottom: 50px;
+    flex-direction: column;
+    align-items: center;
+}
+
+#kss_logo {
+    margin-right: 20px;
+    height: 200px;
+}
+
+#developers {
+    font-family: 'Trebuchet MS', 'Lucida Sans Unicode', 'Lucida Grande', 'Lucida Sans', Arial, sans-serif;
+    font-size: 10px;
+}
+
+#developers a {
+    color: #ffbe31;
+    text-decoration: none;
+}

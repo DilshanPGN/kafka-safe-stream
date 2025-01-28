@@ -1,7 +1,7 @@
 const { Kafka, Partitioners } = require('kafkajs');
 let consumer;
 
-async function createKafkaClient(clientId, brokers) {
+async function createKafkaClient(brokers) {
     return new Kafka({
         clientId: 'kafka-safe-stream-app',
         brokers: brokers,

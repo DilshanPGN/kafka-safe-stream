@@ -7,6 +7,7 @@ body {
 
 #container {
     display: flex;
+    overflow: hidden;
     height: 100vh;
 }
 
@@ -15,24 +16,25 @@ body {
     width: 100px;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 10px 0;
+    align-items: start;
+    padding: 0;
 }
 
 #sidebar button {
     background: none;
     color: #fff;
     border: none;
-    padding: 10px;
-    margin: 10px 0;
+    padding: 25px 0 25px 0;
     cursor: pointer;
     text-align: center;
-    width: 80%;
+    width: 98%;
 }
 
 #sidebar button.active {
     background-color: #444;
-    border-left: 3px solid #007bff;
+    border-left: 5px solid #007bff;
+    text-shadow:1px 1px 10px #fff, 1px 1px 10px #ccc;
+    font-weight: bold;
 }
 
 #main {
@@ -52,7 +54,6 @@ body {
     flex: 1;
     text-align: center;
     background-color: #333;
-    border: none;
     color: #fff;
 }
 
@@ -73,6 +74,8 @@ body {
     margin-right: 10px;
     padding: 10px;
     text-align: center;
+    overflow-y: auto;
+    height: calc(99vh - 90px);
 }
 
 #main #content #topics button {
@@ -80,7 +83,7 @@ body {
     color: #fff;
     border: 1px solid #fff;
     padding: 10px;
-    margin: 10px 0;
+    margin: 2px 0;
     cursor: pointer;
     text-align: center;
     width: 80%;
@@ -95,6 +98,7 @@ body {
 #producerContainer {
     flex: 2;
     display: flex;
+    justify-content: space-between;
     flex-direction: column;
     background-color: #555;
     padding: 10px;
@@ -113,6 +117,7 @@ body {
 #consumerContainer {
     flex: 2;
     display: flex;
+    justify-content: space-between;
     flex-direction: column;
     background-color: #555;
     padding: 10px;
@@ -129,14 +134,16 @@ body {
 }
 
 #produceButton:disabled,
-#consumeButton:disabled {
+#consumeButton:disabled,
+#formatButton:disabled {
     background-color: #6c757d;
     cursor: not-allowed;
     opacity: 0.65;
 }
 
 #produceButton:disabled:hover,
-#consumeButton:disabled:hover {
+#consumeButton:disabled:hover,
+#formatButton:disabled:hover {
     background-color: #6c757d;
     cursor: not-allowed;
 }
@@ -192,8 +199,31 @@ body {
     }
 }
 
-/*Alerts*/
+@keyframes slideIn {
+    0% {
+        transform: translateY(100%);
+        opacity: 0;
+    }
+    100% {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
 
+.list-item {
+    animation: slideIn 0.5s ease-in-out;
+}
+
+/* CodeMirror */
+.CodeMirror {
+    font-family: monospace;
+    width: 100%;
+    height: calc(90vh - 90px);
+    float: left;
+    border: 1px solid black;
+}
+
+/*Alerts*/
 .custom-alert {
     display: none;
     position: fixed;

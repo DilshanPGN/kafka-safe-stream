@@ -1,26 +1,7 @@
+const { app } = require('electron');
 const { createKafkaClient, produceMessage, stopConsuming, consumeMessages } = require("./backend/kafka");
-
-let envConfig = {
-    "dev": {
-        "id": "dev",
-        "label": "DEV",
-        "brokers": ["localhost:9092"],
-        "topicList": [
-            "test.topic",
-            "alm-kafka-demo-topic"
-        ]
-    },
-    "qa": {
-        "id": "qa",
-        "label": "QA",
-        "brokers": ["localhost:9092"],
-        "topicList": [
-            "qa-abc",
-            "alm-kafka-demo-topic"
-        ]
-    }
-};
-
+const path = require('path');
+const fs = require('fs');
 
 const method = {
     'producer': {
@@ -30,47 +11,92 @@ const method = {
     },
     'consumer': {
         id: 'consumer',
-        label: 'Consumer',
+        label: '⚫ Consumer',
         containerId: 'consumerContainer'
     }
 }
-
-let activeEnv = 'dev';
-let activeMethod = 'producer';
-let activeTopicList = envConfig[activeEnv].topicList;
-let activeTopic = '';
 const kafkaSafeStreamGroup = 'kafka-safe-stream-group';
+const LINE_SEPARATOR = '\n\n◀▶\n\n';
+
+let activeEnv = null;
+let activeMethod = 'producer';
+let activeTopicList = null;
+let activeTopic = '';
 let consumeStarted = false;
+let envConfig = null;
+let validPayload = false;
+let editor = null;
+let consumer = null;
+window.refreshIntervalId = null;
 
-// ipcMain.on('load-config', (event) => {
-//     const configPath = path.join(__dirname, '.config');
-//     fs.readFile(configPath, 'utf8', (err, config) => {
-//         if (err) {
-//             console.error('Error reading the config file:', err);
-//             dialog.showErrorBox('File Read Error', 'Error reading the config file. Please check the file and try again.');
-//             app.quit();
-//             return;
-//         }
-//         try {
-//             envConfig = JSON.parse(config);
-//             // event.sender.send('config-data', configJson);
-//         } catch (parseErr) {
-//             console.error('Invalid JSON format:', parseErr);
-//             dialog.showErrorBox('JSON Parse Error', 'Invalid JSON format in the config file. Please correct the file and try again.');
-//             app.quit();
-//             return;
-//         }
-//     });
-// });
+function loadConfig() {
+    const configPath = path.join(__dirname, '.config');
+    try {
+        const config = fs.readFileSync(configPath, 'utf8');
+        envConfig = JSON.parse(config);
+        activeEnv = Object.keys(envConfig)[0];
+        activeTopicList = envConfig[activeEnv].topicList;
+        return envConfig;
+    } catch (err) {
+        console.error('Error reading or parsing the config file:', err);
+        showAlert("File Read/Parse Error', 'Error reading or parsing the config file. Please check the file and try again.", error.message);
+        app.quit();
+    }
+}
 
+function initializeEditor() {
+    let editorContainer = document.getElementById('payload');
+    editor = CodeMirror(editorContainer, {
+        lineSeparator: null,
+        indentUnit: 2,
+        smartIndent: true,
+        tabSize: 2,
+        indentWithTabs: false,
+        lineNumbers: true,
+        firstLineNumber: 1,
+        lineWrapping: true,
+        lineWiseCopyCut: true,
+        undoDepth: 200,
+        historyEventDelay: 1250,
+        autofocus: true,
+        theme: 'dracula',
+        placeholder: 'Enter a JSON payload...',
+    })
+}
 
-document.addEventListener('DOMContentLoaded', () => {
+function initializeConsumer() {
+    let consumerContainer = document.getElementById('consumedMessages');
+    consumer = CodeMirror(consumerContainer, {
+        lineSeparator: null,
+        indentUnit: 2,
+        smartIndent: true,
+        tabSize: 2,
+        indentWithTabs: false,
+        lineNumbers: true,
+        firstLineNumber: 1,
+        lineWrapping: true,
+        lineWiseCopyCut: true,
+        readOnly: true,
+        undoDepth: 200,
+        historyEventDelay: 1250,
+        autofocus: true,
+        theme: 'dracula',
+        placeholder: 'Consumed messages will display here...',
+    })
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
     showLoading();
+    loadConfig();
+    initializeEditor();
+    initializeConsumer();
+
     const buttonContainer = document.getElementById('sidebar');
+    const formatButton = document.getElementById('formatButton');
+
     Object.values(envConfig).forEach(env => {
         buildEnvButton(buttonContainer, env);
     });
-
 
     const methodTabContainer = document.querySelector('#main #tabs');
     Object.values(method).forEach(method => {
@@ -83,63 +109,96 @@ document.addEventListener('DOMContentLoaded', () => {
 
     onEnvBtnClick(document.getElementById(activeEnv));
 
-    const consumedMessages = document.getElementById('consumedMessages');
-
     document.getElementById('produceButton').addEventListener('click', async () => {
         showLoading();
-        const payload = document.getElementById('payload').value;
         try {
-            const kafka = await createKafkaClient("my-app", envConfig[activeEnv].brokers);
-            await produceMessage(kafka, activeTopic, payload);
+            const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
+            await produceMessage(kafka, activeTopic, editor.getValue());
         } catch (error) {
-            showAlert("Kafka Producer Error" ,error.message);
+            showAlert("Kafka Producer Error", error.message);
         }
         hideLoading();
     });
 
     document.getElementById('clearMessages').addEventListener('click', () => {
-        const consumedMessages = document.getElementById('consumedMessages');
-        consumedMessages.value = '';
+        consumer.setValue('');
     });
 
     document.getElementById('consumeButton').addEventListener('click', async () => {
         showLoading();
 
+        const consumerTab = document.getElementById('consumer');
+        consumerTab.addEventListener('click', () => {
+            consumer.refresh();
+            // Scroll to the bottom of the editor
+            const lastLine = consumer.getScrollInfo().height;
+            consumer.scrollTo(0, lastLine);
+        });
+
         if (!consumeStarted) {
             try {
-                const kafka = await createKafkaClient("my-app", envConfig[activeEnv].brokers);
+                const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
                 await consumeMessages(kafka, activeTopic, kafkaSafeStreamGroup, (message) => {
-                    consumedMessages.value += message + '\n';
-                }).then(() => {
+                    consumer.setValue(consumer.getValue() + message + LINE_SEPARATOR);
+                    // Scroll to the bottom of the editor
+                    const lastLine = consumer.getScrollInfo().height;
+                    consumer.scrollTo(0, lastLine);
+                }).finally(() => {
                     hideLoading();
                 });
                 let consumeBtn = document.getElementById('consumeButton');
                 consumeBtn.innerHTML = 'Stop Consuming';
                 consumeBtn.style.backgroundColor = '#dc3545';
                 consumeStarted = true;
+                let consumingTopic = '[' + activeEnv.toUpperCase() + ' ← ' + activeTopic + ']';
+                window.refreshIntervalId = setInterval(function () {
+                    consumerTab.innerHTML = consumerTab.innerHTML === '⚫ Consumer ' + consumingTopic ? '🔴 Consumer ' + consumingTopic : '⚫ Consumer ' + consumingTopic;
+                }, 1000);
+
             } catch (error) {
-                showAlert("Kafka Consumer Error" ,error.message);
+                showAlert("Kafka Consumer Error", error.message);
             }
         } else {
-            await stopConsuming().then(() => {
+            await stopConsuming().finally(() => {
                 hideLoading();
             });
+            clearInterval(window.refreshIntervalId);
+            consumerTab.innerHTML = '⚫ Consumer';
             let consumeBtn = document.getElementById('consumeButton');
             consumeBtn.innerHTML = 'Start Consuming';
             consumeBtn.style.backgroundColor = '#007bff';
             consumeStarted = false;
         }
+    });
 
+    document.getElementById('payload').addEventListener('keyup', () => {
+        try {
+            JSON.parse(editor.getValue());
+            validPayload = true;
+            formatButton.disabled = false;
+        } catch (e) {
+            validPayload = false;
+            formatButton.disabled = true;
+        }
+        reloadProduceButton();
+    });
+
+    formatButton.addEventListener('click', () => {
+        try {
+            const formatted = JSON.stringify(JSON.parse(editor.getValue()), null, 2);
+            editor.setValue(formatted);
+        } catch (e) {
+            showAlert("JSON Format Error", "Error formatting JSON. Please check the JSON and try again.", e.message);
+        }
+        reloadProduceButton();
     });
 
     hideLoading();
 });
 
-async function reloadConsumerProducerButtons() {
+function reloadProduceButton() {
     const produceButton = document.getElementById('produceButton');
-    produceButton.disabled = activeTopic === '';
-    consumeStarted = false;
-    await stopConsuming();
+    produceButton.disabled = activeTopic === '' || !validPayload;
 }
 
 const onEnvBtnClick = (btn) => {
@@ -150,8 +209,12 @@ const onEnvBtnClick = (btn) => {
     activeEnv = btn.id;
     activeTopicList = envConfig[activeEnv].topicList;
     activeTopic = '';
-    const stopConsumeButton = document.getElementById('consumeButton');
-    stopConsumeButton.disabled = true;
+
+    if (!consumeStarted) {
+        const stopConsumeButton = document.getElementById('consumeButton');
+        stopConsumeButton.disabled = true;
+    }
+
     activeMethod = 'producer';
 
     const topicContainer = document.querySelector('#main #content #topics');
@@ -160,11 +223,13 @@ const onEnvBtnClick = (btn) => {
     }
     topicContainer.appendChild(document.createElement('h3')).textContent = 'TOPICS';
 
-    activeTopicList.forEach(topic => {
-        buildTopicButton(topicContainer, topic);
+    activeTopicList.forEach((topic, index) => {
+        setTimeout(() => {
+            buildTopicButton(topicContainer, topic);
+        }, index * 100);
     });
 
-    reloadConsumerProducerButtons();
+    reloadProduceButton();
 
     hideLoading();
 }
@@ -176,7 +241,7 @@ const onTopicBtnClick = (btn) => {
     activeTopic = btn.id;
     const stopConsumeButton = document.getElementById('consumeButton');
     stopConsumeButton.disabled = false;
-    reloadConsumerProducerButtons();
+    reloadProduceButton();
     hideLoading();
 }
 
@@ -215,6 +280,7 @@ const buildMethodTab = (methodTabContainer, method) => {
 
 const buildTopicButton = (topicContainer, topic) => {
     const btn = document.createElement('button');
+    btn.classList.add('list-item');
     btn.textContent = topic;
     btn.id = topic;
     btn.onclick = () => onTopicBtnClick(btn);
@@ -225,16 +291,12 @@ const buildTopicButton = (topicContainer, topic) => {
 }
 
 const showLoading = () => {
-    console.log('show loading');
     document.getElementById('loading-container').style.display = 'flex';
 }
 
 const hideLoading = () => {
-    console.log('stop loading');
     document.getElementById('loading-container').style.display = 'none';
 }
-
-
 
 function showAlert(topic, message) {
     const alertBox = document.getElementById('custom-alert');
