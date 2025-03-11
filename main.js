@@ -1,7 +1,7 @@
 const { app, BrowserWindow, Menu, shell } = require('electron');
 const path = require('path');
 const isMac = process.platform === 'darwin';
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = false;
 
 let aboutWindow;
 
@@ -19,7 +19,7 @@ function createWindow() {
     const mainMenu = Menu.buildFromTemplate(menu);
     Menu.setApplicationMenu(mainMenu);
 
-    win.webContents.openDevTools(); // Open DevTools to see renderer process logs
+    // win.webContents.openDevTools(); // Open DevTools to see renderer process logs
 }
 
 app.whenReady().then(createWindow);

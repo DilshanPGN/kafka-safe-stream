@@ -139,7 +139,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
                 await consumeMessages(kafka, activeTopic, kafkaSafeStreamGroup, (message) => {
-                    consumer.setValue(consumer.getValue() + message + LINE_SEPARATOR);
+                    const formattedMessage = JSON.stringify(JSON.parse(message), null, 2);
+                    consumer.setValue(consumer.getValue() + formattedMessage + LINE_SEPARATOR);
                     // Scroll to the bottom of the editor
                     const lastLine = consumer.getScrollInfo().height;
                     consumer.scrollTo(0, lastLine);
