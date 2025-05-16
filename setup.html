@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    />
+    <link rel="stylesheet" href="setup.css" />
+    <title>Setup</title>
+  </head>
+  <body>
+    <div id="custom-alert" class="custom-alert">
+      <div class="custom-alert-content">
+          <span class="custom-alert-close">&times;</span>
+          <h3 id="custom-alert-topic"></h3>
+          <p id="custom-alert-message"></p>
+      </div>
+    </div>
+    <div class="container">
+      <div id="topics">
+        <h3>CONFIGURATION</h3>
+      </div>
+      <div class="content-group">
+        <textarea id="configText" placeholder="Enter Configuration"></textarea>
+        <p id="configPathText"></p>
+        <button id="saveConfig" disabled>Save & Close</button>
+      </div>
+    </div>
+    <script src="setup.js"></script>
+  </body>
+</html>

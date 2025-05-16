@@ -2,7 +2,10 @@
 A Lightweight Kafka user interface for sending messages to and receiving messages from Kafka topics. 
 
 ### Configuration
-Create a file named `.config` in the root directory following below schema
+Initiate the File > Setup for configuration or create a .config file in the `%userprofile%\.kss\` on Windows.
+
+###### This is tested only on Windows so far. Check under the [Release](https://github.com/DilshanPGN/kafka-safe-stream/releases) for the latest release.
+
 
 ```json
 {
@@ -26,3 +29,4 @@ Create a file named `.config` in the root directory following below schema
 }
 
 ```
+

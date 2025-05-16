@@ -1,7 +1,9 @@
-const { app } = require('electron');
+const { ipcRenderer } = require('electron');
 const { createKafkaClient, produceMessage, stopConsuming, consumeMessages } = require("./backend/kafka");
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const Ajv = require('ajv');
 
 const method = {
     'producer': {
@@ -15,6 +17,12 @@ const method = {
         containerId: 'consumerContainer'
     }
 }
+
+// Load the schema from file
+const schemaPath = path.join(__dirname, 'schema.json');
+const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+
+const ajv = new Ajv();
 const kafkaSafeStreamGroup = 'kafka-safe-stream-group';
 const LINE_SEPARATOR = '\n\n◀▶\n\n';
 
@@ -29,18 +37,48 @@ let editor = null;
 let consumer = null;
 window.refreshIntervalId = null;
 
-function loadConfig() {
-    const configPath = path.join(__dirname, '.config');
-    try {
-        const config = fs.readFileSync(configPath, 'utf8');
-        envConfig = JSON.parse(config);
-        activeEnv = Object.keys(envConfig)[0];
-        activeTopicList = envConfig[activeEnv].topicList;
-        return envConfig;
-    } catch (err) {
-        console.error('Error reading or parsing the config file:', err);
-        showAlert("File Read/Parse Error', 'Error reading or parsing the config file. Please check the file and try again.", error.message);
-        app.quit();
+async function loadConfig() {
+    const homeDir = os.homedir();
+    const kssDir = path.join(homeDir, '.kss');
+    const configPath = path.join(kssDir, '.config');
+
+    // Check if .kss directory exists, if not create it
+    if (!fs.existsSync(kssDir)) {
+        fs.mkdirSync(kssDir);
+    }
+
+    // Check if .config file exists
+    if (fs.existsSync(configPath)) {
+        try {
+            const config = fs.readFileSync(configPath, 'utf8');
+            envConfig = JSON.parse(config);
+
+            const valid = ajv.validate(schema, envConfig);
+            if (!valid) {
+                throw new Error('Invalid configuration format');
+            }
+
+            return envConfig;
+        } catch (error) {
+            console.error('Error reading or parsing the config file:', error);
+            hideLoading();
+            closeAlert();
+            // open setup window
+            ipcRenderer.send('open-setup-window');
+            await new Promise(resolve => {
+                ipcRenderer.once('setup-window-closed', resolve);
+            });
+            loadConfig();
+        }
+    } else {
+        hideLoading();
+        closeAlert();
+        //open setup window
+        ipcRenderer.send('open-setup-window');
+        await new Promise(resolve => {
+            ipcRenderer.once('setup-window-closed', resolve);
+        });
+        loadConfig();
     }
 }
 
@@ -87,114 +125,131 @@ function initializeConsumer() {
 
 document.addEventListener('DOMContentLoaded', async () => {
     showLoading();
-    loadConfig();
-    initializeEditor();
-    initializeConsumer();
+    loadConfig().then(() => {
+        
+        // try {
+        //     const valid = ajv.validate(schema, envConfig);
+        //     if (!valid) {
+        //         throw new Error('Invalid configuration format');
+        //     }
+        // } catch (error) {
+        //     showAlert("Config Error", "Invalid configurations. Consider setting up manually. Existing...", error.message);
+        //     // setInterval(() => {
+        //     //     window.close();
+        //     // }, 4000);
+        // }
+        
+        activeEnv = Object.keys(envConfig)[0];
+        activeTopicList = envConfig[activeEnv].topicList;
 
-    const buttonContainer = document.getElementById('sidebar');
-    const formatButton = document.getElementById('formatButton');
-
-    Object.values(envConfig).forEach(env => {
-        buildEnvButton(buttonContainer, env);
-    });
-
-    const methodTabContainer = document.querySelector('#main #tabs');
-    Object.values(method).forEach(method => {
-        buildMethodTab(methodTabContainer, method);
-    });
-
-    Object.values(method).forEach(method => {
-        document.getElementById(method.containerId).style.display = method.id === activeMethod ? 'flex' : 'none';
-    });
-
-    onEnvBtnClick(document.getElementById(activeEnv));
-
-    document.getElementById('produceButton').addEventListener('click', async () => {
-        showLoading();
-        try {
-            const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
-            await produceMessage(kafka, activeTopic, editor.getValue());
-        } catch (error) {
-            showAlert("Kafka Producer Error", error.message);
-        }
-        hideLoading();
-    });
-
-    document.getElementById('clearMessages').addEventListener('click', () => {
-        consumer.setValue('');
-    });
-
-    document.getElementById('consumeButton').addEventListener('click', async () => {
-        showLoading();
-
-        const consumerTab = document.getElementById('consumer');
-        consumerTab.addEventListener('click', () => {
-            consumer.refresh();
-            // Scroll to the bottom of the editor
-            const lastLine = consumer.getScrollInfo().height;
-            consumer.scrollTo(0, lastLine);
+        initializeEditor();
+        initializeConsumer();
+    
+        const buttonContainer = document.getElementById('sidebar');
+        const formatButton = document.getElementById('formatButton');
+    
+        Object.values(envConfig).forEach(env => {
+            buildEnvButton(buttonContainer, env);
         });
-
-        if (!consumeStarted) {
+    
+        const methodTabContainer = document.querySelector('#main #tabs');
+        Object.values(method).forEach(method => {
+            buildMethodTab(methodTabContainer, method);
+        });
+    
+        Object.values(method).forEach(method => {
+            document.getElementById(method.containerId).style.display = method.id === activeMethod ? 'flex' : 'none';
+        });
+    
+        onEnvBtnClick(document.getElementById(activeEnv));
+    
+        document.getElementById('produceButton').addEventListener('click', async () => {
+            showLoading();
             try {
                 const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
-                await consumeMessages(kafka, activeTopic, kafkaSafeStreamGroup, (message) => {
-                    const formattedMessage = JSON.stringify(JSON.parse(message), null, 2);
-                    consumer.setValue(consumer.getValue() + formattedMessage + LINE_SEPARATOR);
-                    // Scroll to the bottom of the editor
-                    const lastLine = consumer.getScrollInfo().height;
-                    consumer.scrollTo(0, lastLine);
-                }).finally(() => {
+                await produceMessage(kafka, activeTopic, editor.getValue());
+            } catch (error) {
+                showAlert("Kafka Producer Error", error.message);
+            }
+            hideLoading();
+        });
+    
+        document.getElementById('clearMessages').addEventListener('click', () => {
+            consumer.setValue('');
+        });
+    
+        document.getElementById('consumeButton').addEventListener('click', async () => {
+            showLoading();
+    
+            const consumerTab = document.getElementById('consumer');
+            consumerTab.addEventListener('click', () => {
+                consumer.refresh();
+                // Scroll to the bottom of the editor
+                const lastLine = consumer.getScrollInfo().height;
+                consumer.scrollTo(0, lastLine);
+            });
+    
+            if (!consumeStarted) {
+                try {
+                    const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
+                    await consumeMessages(kafka, activeTopic, kafkaSafeStreamGroup, (message) => {
+                        const formattedMessage = JSON.stringify(JSON.parse(message), null, 2);
+                        consumer.setValue(consumer.getValue() + formattedMessage + LINE_SEPARATOR);
+                        // Scroll to the bottom of the editor
+                        const lastLine = consumer.getScrollInfo().height;
+                        consumer.scrollTo(0, lastLine);
+                    }).finally(() => {
+                        hideLoading();
+                    });
+                    let consumeBtn = document.getElementById('consumeButton');
+                    consumeBtn.innerHTML = 'Stop Consuming';
+                    consumeBtn.style.backgroundColor = '#dc3545';
+                    consumeStarted = true;
+                    let consumingTopic = '[' + activeEnv.toUpperCase() + ' ← ' + activeTopic + ']';
+                    window.refreshIntervalId = setInterval(function () {
+                        consumerTab.innerHTML = consumerTab.innerHTML === '⚫ Consumer ' + consumingTopic ? '🔴 Consumer ' + consumingTopic : '⚫ Consumer ' + consumingTopic;
+                    }, 1000);
+    
+                } catch (error) {
+                    showAlert("Kafka Consumer Error", error.message);
+                }
+            } else {
+                await stopConsuming().finally(() => {
                     hideLoading();
                 });
+                clearInterval(window.refreshIntervalId);
+                consumerTab.innerHTML = '⚫ Consumer';
                 let consumeBtn = document.getElementById('consumeButton');
-                consumeBtn.innerHTML = 'Stop Consuming';
-                consumeBtn.style.backgroundColor = '#dc3545';
-                consumeStarted = true;
-                let consumingTopic = '[' + activeEnv.toUpperCase() + ' ← ' + activeTopic + ']';
-                window.refreshIntervalId = setInterval(function () {
-                    consumerTab.innerHTML = consumerTab.innerHTML === '⚫ Consumer ' + consumingTopic ? '🔴 Consumer ' + consumingTopic : '⚫ Consumer ' + consumingTopic;
-                }, 1000);
-
-            } catch (error) {
-                showAlert("Kafka Consumer Error", error.message);
+                consumeBtn.innerHTML = 'Start Consuming';
+                consumeBtn.style.backgroundColor = '#007bff';
+                consumeStarted = false;
             }
-        } else {
-            await stopConsuming().finally(() => {
-                hideLoading();
-            });
-            clearInterval(window.refreshIntervalId);
-            consumerTab.innerHTML = '⚫ Consumer';
-            let consumeBtn = document.getElementById('consumeButton');
-            consumeBtn.innerHTML = 'Start Consuming';
-            consumeBtn.style.backgroundColor = '#007bff';
-            consumeStarted = false;
-        }
+        });
+    
+        document.getElementById('payload').addEventListener('keyup', () => {
+            try {
+                JSON.parse(editor.getValue());
+                validPayload = true;
+                formatButton.disabled = false;
+            } catch (e) {
+                validPayload = false;
+                formatButton.disabled = true;
+            }
+            reloadProduceButton();
+        });
+    
+        formatButton.addEventListener('click', () => {
+            try {
+                const formatted = JSON.stringify(JSON.parse(editor.getValue()), null, 2);
+                editor.setValue(formatted);
+            } catch (error) {
+                showAlert("JSON Format Error", "Error formatting JSON. Please check the JSON and try again.", error.message);
+            }
+            reloadProduceButton();
+        });
+    }).finally(() => {
+        hideLoading();
     });
-
-    document.getElementById('payload').addEventListener('keyup', () => {
-        try {
-            JSON.parse(editor.getValue());
-            validPayload = true;
-            formatButton.disabled = false;
-        } catch (e) {
-            validPayload = false;
-            formatButton.disabled = true;
-        }
-        reloadProduceButton();
-    });
-
-    formatButton.addEventListener('click', () => {
-        try {
-            const formatted = JSON.stringify(JSON.parse(editor.getValue()), null, 2);
-            editor.setValue(formatted);
-        } catch (e) {
-            showAlert("JSON Format Error", "Error formatting JSON. Please check the JSON and try again.", e.message);
-        }
-        reloadProduceButton();
-    });
-
-    hideLoading();
 });
 
 function reloadProduceButton() {

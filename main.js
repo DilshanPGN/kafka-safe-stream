@@ -1,12 +1,16 @@
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
 const path = require('path');
 const isMac = process.platform === 'darwin';
 const isDev = false;
 
+let mainWindow;
 let aboutWindow;
+let setupWindow;
 
 function createWindow() {
-    const win = new BrowserWindow({
+    mainWindow = new BrowserWindow({
+        width: 1000,
+        height: 800,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
@@ -14,12 +18,14 @@ function createWindow() {
         icon: path.join(__dirname, 'kss_logo.png'),
     });
 
-    win.loadFile('index.html');
+    mainWindow.loadFile('index.html');
 
-    const mainMenu = Menu.buildFromTemplate(menu);
-    Menu.setApplicationMenu(mainMenu);
+    const menu = Menu.buildFromTemplate(isMac ? macMenu : winMenu);
+    Menu.setApplicationMenu(menu);
 
-    // win.webContents.openDevTools(); // Open DevTools to see renderer process logs
+    if (isDev) {
+        mainWindow.webContents.openDevTools(); // Open DevTools to see renderer process logs
+    }
 }
 
 app.whenReady().then(createWindow);
@@ -53,6 +59,8 @@ function createAboutWindow() {
             nodeIntegration: true,
             contextIsolation: true,
         },
+        resizable: false,
+        icon: path.join(__dirname, 'kss_logo.png'),
     });
 
     aboutWindow.loadFile(path.join(__dirname, './about.html'));
@@ -63,52 +71,126 @@ function createAboutWindow() {
 
     // Open links in default web browser
     aboutWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-});
+        shell.openExternal(url);
+        return { action: 'deny' };
+    });
 }
 
+// About Window
+function createSetupWindow() {
+
+    if (setupWindow) {
+        setupWindow.focus();
+        return;
+    }
+
+    setupWindow = new BrowserWindow({
+        width: 600,
+        height: 400,
+        title: 'Setup Configurations',
+        autoHideMenuBar: true,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false,
+        },
+        icon: path.join(__dirname, 'kss_logo.png'),
+    });
+
+    setupWindow.loadFile(path.join(__dirname, './setup.html'));
+
+    setupWindow.on('closed', () => {
+        setupWindow = null;
+        // Notify the renderer process that the About window is closed
+        mainWindow.webContents.send('setup-window-closed');
+    });
+}
+
+ipcMain.on('close-setup-window', () => {
+    setupWindow.close();
+});
+
+ipcMain.on('open-setup-window', () => {
+    createSetupWindow();
+});
+
 // Menu template
-const menu = [
-    ...(isMac
-        ? [
+// Menu template for macOS
+const macMenu = [
+    {
+        label: app.name,
+        submenu: [
             {
-                label: app.name,
-                submenu: [
-                    {
-                        label: 'About',
-                        click: createAboutWindow,
-                    },
-                ],
+                label: 'About',
+                click: createAboutWindow,
             },
-        ]
-        : []),
+        ],
+    },
+    {
+        label: 'File',
+        submenu: [
+            {
+                label: 'Setup',
+                click: createSetupWindow,
+            },
+            {
+                label: 'Quit',
+                click: () => app.quit(),
+                accelerator: 'Cmd+Q',
+            },
+        ],
+    },
     {
         role: 'fileMenu',
     },
-    ...(!isMac
+    {
+        label: 'Help',
+        submenu: [
+            {
+                label: 'About',
+                click: createAboutWindow,
+            },
+        ],
+    },
+    ...(isDev
         ? [
             {
-                label: 'Help',
+                label: 'Developer',
                 submenu: [
-                    {
-                        label: 'About',
-                        click: createAboutWindow,
-                    },
+                    { role: 'reload' },
+                    { role: 'forcereload' },
+                    { type: 'separator' },
+                    { role: 'toggledevtools' },
                 ],
             },
         ]
         : []),
-    // {
-    //   label: 'File',
-    //   submenu: [
-    //     {
-    //       label: 'Quit',
-    //       click: () => app.quit(),
-    //       accelerator: 'CmdOrCtrl+W',
-    //     },
-    //   ],
-    // },
+];
+
+// Menu template for Windows/Linux
+const winMenu = [
+    {
+        label: 'File',
+        submenu: [
+            {
+                label: 'Setup',
+                click: createSetupWindow,
+            },
+            {
+                label: 'Quit',
+                click: () => app.quit(),
+                accelerator: 'Ctrl+Q',
+            },
+        ],
+    },
+    {
+        label: 'Help',
+        submenu: [
+            {
+                label: 'About',
+                click: createAboutWindow,
+            },
+        ],
+    },
     ...(isDev
         ? [
             {

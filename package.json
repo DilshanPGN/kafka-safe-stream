@@ -4,11 +4,10 @@
   "description": "A light weight bare minimum Kafka UI",
   "main": "main.js",
   "scripts": {
-    "start": "npx electronmon .",
+    "start": "electronmon .",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dist:mac": "npm run transpile:electron && npm run build && electron-builder --mac --arm64",
-    "dist:win": "npm run transpile:electron && npm run build && electron-builder --win --x64",
-    "dist:linux": "npm run transpile:electron && npm run build && electron-builder --linux --x64"
+    "package": "electron-forge package",
+    "make": "electron-forge make"
   },
   "repository": {
     "type": "git",
@@ -21,9 +20,19 @@
   },
   "homepage": "https://github.com/DilshanPGN/kafka-safe-stream#readme",
   "devDependencies": {
-    "electron": "34.0.1"
+    "@electron-forge/cli": "^7.6.1",
+    "@electron-forge/maker-deb": "^7.6.1",
+    "@electron-forge/maker-rpm": "^7.6.1",
+    "@electron-forge/maker-squirrel": "^7.6.1",
+    "@electron-forge/maker-zip": "^7.6.1",
+    "@electron-forge/plugin-auto-unpack-natives": "^7.6.1",
+    "@electron-forge/plugin-fuses": "^7.6.1",
+    "@rabbitholesyndrome/electron-forge-maker-portable": "0.2.0",
+    "electron": "34.0.1",
+    "electronmon": "^2.0.3"
   },
   "dependencies": {
+    "ajv": "^8.17.1",
     "kafkajs": "^2.2.4"
   }
 }
