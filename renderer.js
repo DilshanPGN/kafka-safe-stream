@@ -45,7 +45,8 @@ const PREFS_PATH = path.join(os.homedir(), '.kss', 'preferences.json');
 let activeEnv = null;
 let activeMethod = 'producer';
 let activeTopicList = null;
-let activeTopic = '';
+let producerTopic = '';
+let consumerTopic = '';
 let consumeStarted = false;
 let envConfig = null;
 let validPayload = false;
@@ -203,7 +204,8 @@ function updateSummaryCards() {
         activeEnvName.textContent = env.label || activeEnv;
     }
 
-    activeTopicName.textContent = activeTopic || '-';
+    const selectedTopicLabel = activeMethod === 'consumer' ? consumerTopic : producerTopic;
+    activeTopicName.textContent = selectedTopicLabel || '-';
     if (activeGroupName) activeGroupName.textContent = consumerGroup || '-';
 }
 
@@ -559,15 +561,13 @@ function ensureTopicInList(topicName) {
     if (!activeTopicList.includes(topicName)) {
         activeTopicList = [...activeTopicList, topicName];
     }
-    populateTopicSelect();
-    activeTopic = topicName;
-    document.getElementById('topicSelect').value = activeTopic;
 }
 
 async function useTopic(topicName, methodId) {
     ensureTopicInList(topicName);
-    onTopicChange(topicName);
     onMethodTabClick(document.getElementById(methodId));
+    populateTopicSelect();
+    onTopicChange(topicName, methodId);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -613,7 +613,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const expanded = expandTokens(editor.getValue());
                 const kafka = await getKafkaClient();
-                await produceMessage(kafka, activeTopic, expanded);
+                await produceMessage(kafka, producerTopic, expanded);
             } catch (error) {
                 showAlert('Kafka Producer Error', error.message);
             }
@@ -737,7 +737,7 @@ function setConsumeRunningUI(running) {
     if (!consumeBtn) return;
     consumeBtn.innerHTML = running ? 'Stop Consuming' : 'Start Consuming';
     consumeBtn.style.backgroundColor = running ? '#dc3545' : '';
-    consumeBtn.disabled = !running && (activeTopic === '');
+    consumeBtn.disabled = !running && (consumerTopic === '');
     const fields = ['startModeGroup', 'partitionSelect', 'offsetInput', 'maxMessagesInput', 'consumerGroupInput'];
     fields.forEach((id) => {
         const el = document.getElementById(id);
@@ -754,7 +754,7 @@ function readConsumerOptions() {
     const maxMessagesRaw = document.getElementById('maxMessagesInput').value;
     const groupRaw = document.getElementById('consumerGroupInput').value.trim();
     return {
-        topic: activeTopic,
+        topic: consumerTopic,
         groupId: groupRaw || DEFAULT_GROUP,
         startMode,
         partition: partitionRaw === '' ? null : Number(partitionRaw),
@@ -776,7 +776,7 @@ function wireConsumerControls() {
     const refreshPartitionsButton = document.getElementById('refreshPartitionsButton');
     if (refreshPartitionsButton) {
         refreshPartitionsButton.addEventListener('click', () => {
-            if (activeTopic) refreshPartitions(activeTopic);
+            if (consumerTopic) refreshPartitions(consumerTopic);
         });
     }
 
@@ -790,8 +790,8 @@ function wireConsumerControls() {
         groupInput.addEventListener('change', () => {
             consumerGroup = groupInput.value.trim() || DEFAULT_GROUP;
             updateSummaryCards();
-            if (activeTopic) {
-                setGroupForTopic(activeEnv, activeTopic, consumerGroup);
+            if (consumerTopic) {
+                setGroupForTopic(activeEnv, consumerTopic, consumerGroup);
             }
         });
     }
@@ -934,7 +934,7 @@ async function reapplyConfig(newConfig) {
 
 function reloadProduceButton() {
     const produceButton = document.getElementById('produceButton');
-    produceButton.disabled = activeTopic === '' || !validPayload;
+    produceButton.disabled = producerTopic === '' || !validPayload;
 }
 
 const onEnvChange = (envId) => {
@@ -942,7 +942,8 @@ const onEnvChange = (envId) => {
 
     activeEnv = envId;
     activeTopicList = (envConfig[activeEnv].topicList || []).slice();
-    activeTopic = '';
+    producerTopic = '';
+    consumerTopic = '';
     consumerGroup = DEFAULT_GROUP;
     document.getElementById('envSelect').value = activeEnv;
 
@@ -968,23 +969,30 @@ const onEnvChange = (envId) => {
     hideLoading();
 };
 
-const onTopicChange = (topic) => {
+const onTopicChange = (topic, methodId) => {
     showLoading();
-    activeTopic = topic;
-    consumerGroup = activeTopic ? getGroupForTopic(activeEnv, activeTopic) : DEFAULT_GROUP;
-    const groupInput = document.getElementById('consumerGroupInput');
-    if (groupInput) groupInput.value = consumerGroup;
+    const m = methodId || activeMethod;
+    if (m === 'consumer') {
+        consumerTopic = topic;
+        consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
+        const groupInput = document.getElementById('consumerGroupInput');
+        if (groupInput) groupInput.value = consumerGroup;
 
-    const stopConsumeButton = document.getElementById('consumeButton');
-    if (!consumeStarted) {
-        stopConsumeButton.disabled = activeTopic === '';
+        const stopConsumeButton = document.getElementById('consumeButton');
+        if (!consumeStarted) {
+            stopConsumeButton.disabled = consumerTopic === '';
+        }
+        if (consumerTopic) {
+            refreshPartitions(consumerTopic);
+        } else {
+            refreshPartitions('');
+        }
+    } else if (m === 'producer') {
+        producerTopic = topic;
     }
     reloadProduceButton();
     updateSummaryCards();
     applyReadOnlyState();
-    if (activeTopic) {
-        refreshPartitions(activeTopic);
-    }
     hideLoading();
 };
 
@@ -1002,6 +1010,30 @@ const onMethodTabClick = (tab) => {
     }
 
     applyActiveMethodLayout();
+
+    const topicSelect = document.getElementById('topicSelect');
+    if (topicSelect && tab.id !== 'topicsBrowser') {
+        topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
+    }
+
+    if (tab.id === 'consumer') {
+        consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
+        const groupInput = document.getElementById('consumerGroupInput');
+        if (groupInput) groupInput.value = consumerGroup;
+        if (consumerTopic) {
+            refreshPartitions(consumerTopic);
+        } else {
+            refreshPartitions('');
+        }
+        const stopConsumeButton = document.getElementById('consumeButton');
+        if (!consumeStarted && stopConsumeButton) {
+            stopConsumeButton.disabled = consumerTopic === '';
+        }
+    } else if (tab.id === 'producer') {
+        reloadProduceButton();
+    }
+
+    updateSummaryCards();
 };
 
 const buildMethodTab = (methodTabContainer, m) => {
@@ -1040,7 +1072,7 @@ const populateTopicSelect = () => {
         topicSelect.appendChild(option);
     });
 
-    topicSelect.value = activeTopic;
+    topicSelect.value = activeMethod === 'consumer' ? consumerTopic : producerTopic;
     topicSelect.onchange = (event) => onTopicChange(event.target.value);
 };
 
