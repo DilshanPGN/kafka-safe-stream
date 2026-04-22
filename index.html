@@ -31,6 +31,18 @@
           <p id="custom-alert-message"></p>
       </div>
   </div>
+  <div id="prompt-modal" class="custom-alert prompt-modal">
+      <div class="custom-alert-content prompt-content">
+          <span class="custom-alert-close" id="prompt-close">&times;</span>
+          <h3 id="prompt-title">Enter value</h3>
+          <p id="prompt-message"></p>
+          <input type="text" id="prompt-input" />
+          <div class="prompt-actions">
+              <button id="prompt-cancel" class="btn-secondary">Cancel</button>
+              <button id="prompt-confirm" class="btn-primary">OK</button>
+          </div>
+      </div>
+  </div>
   <div id="container">
       <aside id="sidebar">
           <div class="brand">KSS</div>
@@ -52,8 +64,8 @@
                       <input type="checkbox" id="themeToggle" />
                       <span class="theme-slider"></span>
                   </label>
-                  <button class="toolbar-pill active">Read-only</button>
-                  <button class="toolbar-pill">Options</button>
+                  <button id="readonlyToggle" class="toolbar-pill active" aria-pressed="true" title="Toggle read-only mode">Read-only</button>
+                  <button id="setupButton" class="toolbar-pill">Options</button>
               </div>
           </header>
           <section id="summaryCards">
@@ -73,6 +85,10 @@
                   <span class="summary-value" id="activeTopicName">-</span>
                   <span class="summary-label">Selected Topic</span>
               </div>
+              <div class="summary-card">
+                  <span class="summary-value" id="activeGroupName">-</span>
+                  <span class="summary-label">Consumer Group</span>
+              </div>
           </section>
           <div id="content">
               <div id="topics">
@@ -82,6 +98,21 @@
               </div>
               <div id="producerContainer">
                   <div class="panel-heading">Producer Payload</div>
+                  <div class="template-toolbar">
+                      <label class="topic-label" for="templateSelect">Template</label>
+                      <select id="templateSelect">
+                          <option value="">— select template —</option>
+                      </select>
+                      <button id="loadTemplateButton" class="btn-secondary">Load</button>
+                      <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
+                      <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
+                      <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
+                      <div class="token-picker-wrapper">
+                          <select id="tokenInsertSelect" title="Insert random token">
+                              <option value="">Insert token…</option>
+                          </select>
+                      </div>
+                  </div>
                   <div id="payload"></div>
                   <div class="actions">
                       <button id="formatButton" disabled>Format</button>
@@ -90,10 +121,77 @@
               </div>
               <div id="consumerContainer">
                   <div class="panel-heading">Consumed Messages</div>
+                  <div class="consumer-controls">
+                      <div class="control-row">
+                          <span class="control-label">Start from</span>
+                          <div class="radio-group" id="startModeGroup">
+                              <label><input type="radio" name="startMode" value="latest" checked> Now (latest)</label>
+                              <label><input type="radio" name="startMode" value="earliest"> Beginning</label>
+                              <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
+                          </div>
+                      </div>
+                      <div class="control-row offset-row" id="offsetRow" style="display:none;">
+                          <label class="control-inline">
+                              <span>Partition</span>
+                              <select id="partitionSelect">
+                                  <option value="">All partitions</option>
+                              </select>
+                          </label>
+                          <label class="control-inline">
+                              <span>Offset</span>
+                              <input type="number" id="offsetInput" min="0" placeholder="0" />
+                          </label>
+                          <button id="refreshPartitionsButton" class="btn-secondary" title="Refresh partitions for this topic">↻</button>
+                      </div>
+                      <div class="control-row">
+                          <label class="control-inline">
+                              <span>Max messages</span>
+                              <input type="number" id="maxMessagesInput" min="1" placeholder="unlimited" />
+                          </label>
+                          <label class="control-inline group-inline">
+                              <span>Consumer group</span>
+                              <input type="text" id="consumerGroupInput" placeholder="kafka-safe-stream-group" />
+                          </label>
+                      </div>
+                      <div class="control-row">
+                          <label class="control-inline filter-inline">
+                              <span>Filter</span>
+                              <input type="text" id="filterInput" placeholder="Search consumed messages…" />
+                          </label>
+                          <label class="control-checkbox">
+                              <input type="checkbox" id="filterRegex" /> Regex
+                          </label>
+                          <span id="messageCount" class="message-count">0 / 0</span>
+                      </div>
+                  </div>
                   <div id="consumedMessages"></div>
                   <div class="actions">
                       <button id="clearMessages">Clear</button>
                       <button id="consumeButton">Start Consuming</button>
+                  </div>
+              </div>
+              <div id="topicsBrowserContainer">
+                  <div class="panel-heading">Topics &amp; Partitions</div>
+                  <div class="topics-toolbar">
+                      <input type="text" id="topicsSearchInput" placeholder="Search topics…" />
+                      <button id="refreshTopicsButton" class="btn-secondary">↻ Refresh</button>
+                      <span id="topicsCount" class="message-count">0 topics</span>
+                  </div>
+                  <div id="topicsTableWrapper" class="topics-table-wrapper">
+                      <table id="topicsTable" class="topics-table">
+                          <thead>
+                              <tr>
+                                  <th>Topic</th>
+                                  <th>Partitions</th>
+                                  <th>Replication</th>
+                                  <th>Leaders</th>
+                                  <th>Messages</th>
+                                  <th>Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody id="topicsTableBody"></tbody>
+                      </table>
+                      <div id="topicsEmptyState" class="topics-empty">No topics loaded. Click Refresh to load.</div>
                   </div>
               </div>
           </div>

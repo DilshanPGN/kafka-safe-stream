@@ -60,13 +60,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     saveConfigButton.addEventListener('click', async () => {
         try {
             const config = JSON.parse(configTextArea.value);
+            const valid = ajv.validate(schema, config);
+            if (!valid) {
+                showAlert('Invalid configuration', 'Configuration does not match the required schema.');
+                return;
+            }
             const homeDir = os.homedir();
             const kssDir = path.join(homeDir, '.kss');
             const configPath = path.join(kssDir, '.config');
+            if (!fs.existsSync(kssDir)) {
+                fs.mkdirSync(kssDir, { recursive: true });
+            }
             fs.writeFileSync(configPath, JSON.stringify(config, null, 4));
+            ipcRenderer.send('config-saved');
             ipcRenderer.send('close-setup-window');
         } catch(error) {
             console.error('Error reading or parsing the config file:', error);
+            showAlert('Save failed', error.message || 'Unable to save configuration.');
         }
     });
 

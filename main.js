@@ -1,5 +1,7 @@
 const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const isMac = process.platform === 'darwin';
 const isDev = false;
 
@@ -111,6 +113,22 @@ ipcMain.on('close-setup-window', () => {
 
 ipcMain.on('open-setup-window', () => {
     createSetupWindow();
+});
+
+ipcMain.on('config-saved', () => {
+    try {
+        const configPath = path.join(os.homedir(), '.kss', '.config');
+        if (!fs.existsSync(configPath)) {
+            return;
+        }
+        const raw = fs.readFileSync(configPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('config-updated', parsed);
+        }
+    } catch (err) {
+        console.error('Failed to forward config-updated:', err);
+    }
 });
 
 // Menu template
