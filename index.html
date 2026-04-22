@@ -60,9 +60,11 @@
                       <select id="envSelect"></select>
                   </label>
                   <label class="theme-switch" for="themeToggle" title="Toggle theme">
-                      <span class="theme-mode" id="themeModeLabel">🌙 Dark</span>
                       <input type="checkbox" id="themeToggle" />
-                      <span class="theme-slider"></span>
+                      <span class="theme-switch-inner">
+                          <span class="theme-mode" id="themeModeLabel">🌙 Dark</span>
+                          <span class="theme-slider" aria-hidden="true"></span>
+                      </span>
                   </label>
                   <button id="readonlyToggle" class="toolbar-pill active" aria-pressed="true" title="Toggle read-only mode">Read-only</button>
                   <button id="setupButton" class="toolbar-pill">Options</button>
