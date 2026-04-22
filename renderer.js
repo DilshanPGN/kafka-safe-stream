@@ -179,6 +179,14 @@ function renderConsumerTabBlink(show) {
     statusNode.textContent = show ? '●' : '';
 }
 
+function applyActiveMethodLayout() {
+    const hideTopicsChrome = activeMethod === 'topicsBrowser';
+    const ribbon = document.getElementById('summaryCards');
+    if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
+    const optionsSection = document.getElementById('topics');
+    if (optionsSection) optionsSection.style.display = hideTopicsChrome ? 'none' : '';
+}
+
 function updateSummaryCards() {
     const brokerCount = document.getElementById('brokerCount');
     const topicCount = document.getElementById('topicCount');
@@ -992,6 +1000,8 @@ const onMethodTabClick = (tab) => {
     if (tab.id === 'topicsBrowser' && topicsCache.length === 0) {
         loadTopicsBrowser(true);
     }
+
+    applyActiveMethodLayout();
 };
 
 const buildMethodTab = (methodTabContainer, m) => {
