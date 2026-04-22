@@ -101,6 +101,150 @@ function chunkArray(arr, size) {
     return out;
 }
 
+function normalizeBrokerEndpoint(host, port) {
+    return `${String(host).toLowerCase()}:${Number(port)}`;
+}
+
+function parseConfiguredBroker(str) {
+    const s = String(str).trim();
+    const idx = s.lastIndexOf(':');
+    if (idx === -1) {
+        return { host: s.toLowerCase(), port: 9092 };
+    }
+    return {
+        host: s.slice(0, idx).toLowerCase(),
+        port: Number(s.slice(idx + 1)) || 9092,
+    };
+}
+
+/**
+ * Per-topic and aggregate signals from Metadata (ISR vs replicas, leaders, error codes).
+ */
+async function buildTopicHealthSummary(admin) {
+    const { topics } = await admin.fetchTopicMetadata({ topics: [] });
+    let partitionCount = 0;
+    let underReplicatedPartitions = 0;
+    let offlineOrNoLeaderPartitions = 0;
+    let erroredPartitions = 0;
+    const rows = [];
+
+    for (const t of topics) {
+        if (!t.name || t.name.startsWith('__')) continue;
+        const parts = t.partitions || [];
+        let topicUrp = 0;
+        let topicOffline = 0;
+        let topicErr = 0;
+
+        for (const p of parts) {
+            partitionCount += 1;
+            const replicas = Array.isArray(p.replicas) ? p.replicas : [];
+            const isr = Array.isArray(p.isr) ? p.isr : [];
+            const errCode = Number(p.partitionErrorCode || 0);
+            if (errCode !== 0) {
+                erroredPartitions += 1;
+                topicErr += 1;
+            }
+            const leaderNum = Number(p.leader);
+            const noLeader = p.leader === null || p.leader === undefined
+                || !Number.isFinite(leaderNum) || leaderNum < 0;
+            if (noLeader) {
+                offlineOrNoLeaderPartitions += 1;
+                topicOffline += 1;
+            }
+            if (replicas.length > 0 && isr.length < replicas.length) {
+                underReplicatedPartitions += 1;
+                topicUrp += 1;
+            }
+        }
+
+        rows.push({
+            name: t.name,
+            partitionCount: parts.length,
+            underReplicated: topicUrp,
+            offlineOrNoLeader: topicOffline,
+            errors: topicErr,
+        });
+    }
+
+    rows.sort((a, b) => {
+        const score = (r) => r.underReplicated + r.offlineOrNoLeader + r.errors;
+        return score(b) - score(a);
+    });
+
+    const issuesOnly = rows.filter((r) => r.underReplicated + r.offlineOrNoLeader + r.errors > 0);
+    const MAX_ISSUE_TOPICS = 500;
+    const topicsWithIssues = issuesOnly.slice(0, MAX_ISSUE_TOPICS);
+
+    return {
+        totals: {
+            topics: rows.length,
+            partitions: partitionCount,
+            underReplicatedPartitions,
+            offlineOrNoLeaderPartitions,
+            erroredPartitions,
+        },
+        healthyTopics: rows.length - issuesOnly.length,
+        topicsWithIssues,
+        truncatedIssues: issuesOnly.length > MAX_ISSUE_TOPICS,
+        totalIssueTopics: issuesOnly.length,
+    };
+}
+
+/**
+ * Cluster-level metadata from the broker metadata API (not JVM health / metrics).
+ */
+async function getClusterMetadata(kafka, configuredBrokers) {
+    const admin = kafka.admin();
+    const configuredSet = new Set(
+        (configuredBrokers || []).map((b) => {
+            const p = parseConfiguredBroker(b);
+            return `${p.host}:${p.port}`;
+        })
+    );
+    try {
+        await admin.connect();
+        const described = await admin.describeCluster();
+        const topicNames = await admin.listTopics();
+        const userTopics = topicNames.filter((t) => !t.startsWith('__'));
+
+        let groupCount = null;
+        try {
+            const lg = await admin.listGroups();
+            groupCount = new Set((lg.groups || []).map((g) => g.groupId)).size;
+        } catch (_) {
+            groupCount = null;
+        }
+
+        const brokers = (described.brokers || []).map((b) => ({
+            nodeId: b.nodeId,
+            host: b.host,
+            port: b.port,
+            endpoint: `${b.host}:${b.port}`,
+            isController: described.controller === b.nodeId,
+            inBootstrap: configuredSet.has(normalizeBrokerEndpoint(b.host, b.port)),
+        }));
+
+        let topicHealth = null;
+        try {
+            topicHealth = await buildTopicHealthSummary(admin);
+        } catch (err) {
+            topicHealth = { error: err.message || String(err) };
+        }
+
+        return {
+            clusterId: described.clusterId || '—',
+            controllerId: described.controller,
+            brokerCount: brokers.length,
+            brokers,
+            topicCount: userTopics.length,
+            groupCount,
+            topicHealth,
+        };
+    } finally {
+        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+    }
+}
+
 /**
  * List consumer groups that have at least one committed offset for the topic,
  * with log end / lag per partition and describeGroups metadata.
@@ -338,4 +482,5 @@ module.exports = {
     getTopicsAndPartitions,
     getTopicOffsets,
     getConsumerLagOverview,
+    getClusterMetadata,
 };

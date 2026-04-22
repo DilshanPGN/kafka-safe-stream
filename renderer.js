@@ -7,6 +7,7 @@ const {
     getTopicsAndPartitions,
     getTopicOffsets,
     getConsumerLagOverview,
+    getClusterMetadata,
 } = require('./backend/kafka');
 const templatesApi = require('./backend/templates');
 const { expandTokens, TOKEN_DESCRIPTIONS } = require('./backend/randomTokens');
@@ -35,6 +36,11 @@ const method = {
         id: 'consumerLag',
         label: 'Consumer lag',
         containerId: 'consumerLagContainer',
+    },
+    clusterInfo: {
+        id: 'clusterInfo',
+        label: 'Cluster Metadata',
+        containerId: 'clusterInfoContainer',
     },
 };
 
@@ -191,7 +197,9 @@ function renderConsumerTabBlink(show) {
 }
 
 function applyActiveMethodLayout() {
-    const hideTopicsChrome = activeMethod === 'topicsBrowser' || activeMethod === 'consumerLag';
+    const hideTopicsChrome = activeMethod === 'topicsBrowser'
+        || activeMethod === 'consumerLag'
+        || activeMethod === 'clusterInfo';
     const ribbon = document.getElementById('summaryCards');
     if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
     const optionsSection = document.getElementById('topics');
@@ -227,7 +235,9 @@ function updateSummaryCards() {
 
     const selectedTopicLabel = activeMethod === 'consumer'
         ? consumerTopic
-        : (activeMethod === 'consumerLag' ? lagTopic : producerTopic);
+        : (activeMethod === 'consumerLag'
+            ? lagTopic
+            : (activeMethod === 'clusterInfo' ? '' : producerTopic));
     activeTopicName.textContent = selectedTopicLabel || '-';
     if (activeGroupName) activeGroupName.textContent = consumerGroup || '-';
 }
@@ -697,6 +707,126 @@ async function navigateToConsumerLag(topicName) {
     await loadConsumerLagOverview();
 }
 
+function renderTopicHealthSection(th) {
+    const statsEl = document.getElementById('topicHealthStats');
+    const tbody = document.getElementById('topicHealthBody');
+    const empty = document.getElementById('topicHealthEmpty');
+    const trunc = document.getElementById('topicHealthTruncated');
+    if (!statsEl || !tbody || !empty) return;
+
+    if (!th || th.error) {
+        statsEl.innerHTML = '';
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        empty.textContent = (th && th.error)
+            ? `Topic health could not be loaded: ${th.error}`
+            : '—';
+        if (trunc) trunc.textContent = '';
+        return;
+    }
+
+    const t = th.totals;
+    statsEl.innerHTML = `
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.partitions}</div><div class="cluster-stat-label">Partitions (user topics)</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.underReplicatedPartitions}</div><div class="cluster-stat-label">Under-replicated</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.offlineOrNoLeaderPartitions}</div><div class="cluster-stat-label">No leader</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.erroredPartitions}</div><div class="cluster-stat-label">Metadata errors</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${th.healthyTopics}</div><div class="cluster-stat-label">Topics with no issues</div></div>
+    `;
+
+    const issues = th.topicsWithIssues || [];
+    if (issues.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        empty.textContent = `All ${t.topics} non-internal topics look healthy in metadata (no under-replicated, leaderless, or errored partitions).`;
+        if (trunc) trunc.textContent = '';
+        return;
+    }
+
+    empty.style.display = 'none';
+    tbody.innerHTML = '';
+    issues.forEach((r) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td class="topic-cell">${escapeHtml(r.name)}</td>
+            <td>${r.partitionCount}</td>
+            <td>${r.underReplicated}</td>
+            <td>${r.offlineOrNoLeader}</td>
+            <td>${r.errors}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    if (trunc) {
+        trunc.textContent = th.truncatedIssues
+            ? `Showing first ${issues.length} of ${th.totalIssueTopics} topics that have at least one partition issue.`
+            : '';
+    }
+}
+
+function renderClusterMetadata(data) {
+    const summary = document.getElementById('clusterSummary');
+    const tbody = document.getElementById('clusterBrokersBody');
+    const status = document.getElementById('clusterStatus');
+    if (status) {
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+    if (!summary || !tbody) return;
+
+    renderTopicHealthSection(data.topicHealth);
+
+    const controller = data.controllerId;
+    const controllerBroker = (data.brokers || []).find((b) => b.nodeId === controller);
+    const controllerStr = controllerBroker
+        ? `${controllerBroker.host}:${controllerBroker.port} (node ${controller})`
+        : (controller == null ? '—' : `node ${controller}`);
+
+    const groupLabel = data.groupCount === null ? '—' : String(data.groupCount);
+
+    summary.innerHTML = `
+        <div class="cluster-stat"><div class="cluster-stat-value">${escapeHtml(String(data.clusterId))}</div><div class="cluster-stat-label">Cluster ID</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${data.brokerCount}</div><div class="cluster-stat-label">Brokers (metadata)</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${data.topicCount}</div><div class="cluster-stat-label">Topics (non-internal)</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${groupLabel}</div><div class="cluster-stat-label">Consumer groups</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value cluster-stat-value--sm">${escapeHtml(controllerStr)}</div><div class="cluster-stat-label">Controller</div></div>
+    `;
+
+    tbody.innerHTML = '';
+    [...(data.brokers || [])].sort((a, b) => a.nodeId - b.nodeId).forEach((b) => {
+        const tr = document.createElement('tr');
+        const role = b.isController ? 'Controller' : 'Broker';
+        const boot = b.inBootstrap ? 'Yes' : 'No';
+        tr.innerHTML = `
+            <td>${b.nodeId}</td>
+            <td class="topic-cell">${escapeHtml(b.endpoint)}</td>
+            <td>${role}</td>
+            <td>${boot}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+async function loadClusterOverview() {
+    showLoading();
+    try {
+        const kafka = await getKafkaClient();
+        const configured = (envConfig && activeEnv && envConfig[activeEnv])
+            ? envConfig[activeEnv].brokers
+            : [];
+        const data = await getClusterMetadata(kafka, configured);
+        renderClusterMetadata(data);
+    } catch (err) {
+        showAlert('Cluster overview', err.message);
+    } finally {
+        hideLoading();
+    }
+}
+
+function wireClusterOverviewControls() {
+    const btn = document.getElementById('clusterRefreshButton');
+    if (btn) btn.addEventListener('click', () => loadClusterOverview());
+}
+
 function wireLagOverviewControls() {
     const btn = document.getElementById('lagLoadButton');
     if (btn) btn.addEventListener('click', () => loadConsumerLagOverview());
@@ -856,6 +986,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         wireTemplateControls();
         wireTopicsBrowserControls();
         wireLagOverviewControls();
+        wireClusterOverviewControls();
         wireSetupButton();
         rendererInitialized = true;
         if (pendingConfigUpdate) {
@@ -1162,10 +1293,14 @@ const onMethodTabClick = (tab) => {
         populateLagTopicSelect();
     }
 
+    if (tab.id === 'clusterInfo') {
+        loadClusterOverview();
+    }
+
     applyActiveMethodLayout();
 
     const topicSelect = document.getElementById('topicSelect');
-    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag') {
+    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag' && tab.id !== 'clusterInfo') {
         topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
     }
 
@@ -1191,6 +1326,7 @@ const onMethodTabClick = (tab) => {
 
 const buildMethodTab = (methodTabContainer, m) => {
     const tab = document.createElement('button');
+    tab.type = 'button';
     tab.id = m.id;
     tab.classList.add('tab');
     const label = document.createElement('span');

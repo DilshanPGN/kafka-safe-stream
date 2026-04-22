@@ -233,6 +233,48 @@
                       <div id="lagEmptyState" class="topics-empty">Select a topic and click Load.</div>
                   </div>
               </div>
+              <div id="clusterInfoContainer">
+                  <div class="panel-heading">Cluster Metadata</div>
+                  <p class="cluster-hint">Metadata from the Kafka metadata API (brokers, controller, topic count, topic/partition health). JVM health and per-broker metrics require external monitoring (e.g. JMX / Prometheus exporters).</p>
+                  <div class="cluster-toolbar">
+                      <button id="clusterRefreshButton" type="button" class="btn-secondary">↻ Refresh</button>
+                      <span id="clusterStatus" class="lag-status"></span>
+                  </div>
+                  <div class="cluster-summary" id="clusterSummary"></div>
+                  <div class="panel-subheading topic-health-heading">Topic health summary</div>
+                  <p class="cluster-hint cluster-hint--tight">Under-replicated = partition has fewer in-sync replicas than assigned replicas. No leader = leader id missing or invalid in metadata. Errors = non-zero partition error code from the broker.</p>
+                  <div class="cluster-summary" id="topicHealthStats"></div>
+                  <div class="topics-table-wrapper topic-health-table-wrap">
+                      <table class="topics-table" id="topicHealthTable">
+                          <thead>
+                              <tr>
+                                  <th>Topic</th>
+                                  <th>Partitions</th>
+                                  <th>Under-replicated</th>
+                                  <th>No leader</th>
+                                  <th>Metadata errors</th>
+                              </tr>
+                          </thead>
+                          <tbody id="topicHealthBody"></tbody>
+                      </table>
+                      <div id="topicHealthEmpty" class="topics-empty" style="display: none;"></div>
+                  </div>
+                  <p id="topicHealthTruncated" class="cluster-trunc-note"></p>
+                  <div class="panel-subheading cluster-brokers-heading">Brokers</div>
+                  <div class="topics-table-wrapper cluster-brokers-wrap">
+                      <table class="topics-table" id="clusterBrokersTable">
+                          <thead>
+                              <tr>
+                                  <th>Node</th>
+                                  <th>Host:port</th>
+                                  <th>Role</th>
+                                  <th>Bootstrap match</th>
+                              </tr>
+                          </thead>
+                          <tbody id="clusterBrokersBody"></tbody>
+                      </table>
+                  </div>
+              </div>
           </div>
       </div>
   </div>
