@@ -13,7 +13,7 @@ const method = {
     },
     'consumer': {
         id: 'consumer',
-        label: '⚫ Consumer',
+        label: 'Consumer',
         containerId: 'consumerContainer'
     }
 }
@@ -25,6 +25,7 @@ const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 const ajv = new Ajv();
 const kafkaSafeStreamGroup = 'kafka-safe-stream-group';
 const LINE_SEPARATOR = '\n\n◀▶\n\n';
+const THEME_STORAGE_KEY = 'kss-theme';
 
 let activeEnv = null;
 let activeMethod = 'producer';
@@ -36,6 +37,70 @@ let validPayload = false;
 let editor = null;
 let consumer = null;
 window.refreshIntervalId = null;
+let consumerBlinkOn = false;
+
+function applyTheme(theme) {
+    const targetTheme = theme === 'light' ? 'light' : 'dark';
+    document.body.setAttribute('data-theme', targetTheme);
+    const toggle = document.getElementById('themeToggle');
+    const themeModeLabel = document.getElementById('themeModeLabel');
+    if (toggle) {
+        toggle.checked = targetTheme === 'dark';
+    }
+    if (themeModeLabel) {
+        themeModeLabel.innerHTML = targetTheme === 'dark'
+            ? '<span class="theme-icon moon">🌙</span>Dark'
+            : '<span class="theme-icon sun">☀</span>Light';
+    }
+    try {
+        localStorage.setItem(THEME_STORAGE_KEY, targetTheme);
+    } catch (error) {
+        console.warn('Failed to persist theme selection', error);
+    }
+}
+
+function initializeThemeToggle() {
+    let savedTheme = 'dark';
+    try {
+        savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
+    } catch (error) {
+        console.warn('Failed to read persisted theme selection', error);
+    }
+    applyTheme(savedTheme);
+
+    const themeToggle = document.getElementById('themeToggle');
+    if (themeToggle) {
+        themeToggle.addEventListener('change', () => {
+            applyTheme(themeToggle.checked ? 'dark' : 'light');
+        });
+    }
+}
+
+function renderConsumerTabBlink(show) {
+    const statusNode = document.querySelector('#consumer .tab-status');
+    if (!statusNode) {
+        return;
+    }
+    statusNode.textContent = show ? '●' : '';
+}
+
+function updateSummaryCards() {
+    const brokerCount = document.getElementById('brokerCount');
+    const topicCount = document.getElementById('topicCount');
+    const activeEnvName = document.getElementById('activeEnvName');
+    const activeTopicName = document.getElementById('activeTopicName');
+
+    if (envConfig && activeEnv && envConfig[activeEnv]) {
+        const env = envConfig[activeEnv];
+        const brokers = Array.isArray(env.brokers) ? env.brokers : [];
+        const topics = Array.isArray(env.topicList) ? env.topicList : [];
+        brokerCount.textContent = String(brokers.length);
+        topicCount.textContent = String(topics.length);
+        activeEnvName.textContent = env.label || activeEnv;
+    }
+
+    activeTopicName.textContent = activeTopic || '-';
+}
 
 async function loadConfig() {
     const homeDir = os.homedir();
@@ -97,7 +162,7 @@ function initializeEditor() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
-        theme: 'dracula',
+        theme: 'default',
         placeholder: 'Enter a JSON payload...',
     })
 }
@@ -118,26 +183,15 @@ function initializeConsumer() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
-        theme: 'dracula',
+        theme: 'default',
         placeholder: 'Consumed messages will display here...',
     })
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    initializeThemeToggle();
     showLoading();
     loadConfig().then(() => {
-        
-        // try {
-        //     const valid = ajv.validate(schema, envConfig);
-        //     if (!valid) {
-        //         throw new Error('Invalid configuration format');
-        //     }
-        // } catch (error) {
-        //     showAlert("Config Error", "Invalid configurations. Consider setting up manually. Existing...", error.message);
-        //     // setInterval(() => {
-        //     //     window.close();
-        //     // }, 4000);
-        // }
         
         activeEnv = Object.keys(envConfig)[0];
         activeTopicList = envConfig[activeEnv].topicList;
@@ -145,14 +199,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         initializeEditor();
         initializeConsumer();
     
-        const buttonContainer = document.getElementById('sidebar');
+        const envSelect = document.getElementById('envSelect');
         const formatButton = document.getElementById('formatButton');
     
         Object.values(envConfig).forEach(env => {
-            buildEnvButton(buttonContainer, env);
+            const option = document.createElement('option');
+            option.value = env.id;
+            option.textContent = env.label;
+            envSelect.appendChild(option);
+        });
+        envSelect.value = activeEnv;
+        envSelect.addEventListener('change', (event) => {
+            onEnvChange(event.target.value);
         });
     
-        const methodTabContainer = document.querySelector('#main #tabs');
+        const methodTabContainer = document.getElementById('tabs');
         Object.values(method).forEach(method => {
             buildMethodTab(methodTabContainer, method);
         });
@@ -161,7 +222,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById(method.containerId).style.display = method.id === activeMethod ? 'flex' : 'none';
         });
     
-        onEnvBtnClick(document.getElementById(activeEnv));
+        onEnvChange(activeEnv);
+        updateSummaryCards();
     
         document.getElementById('produceButton').addEventListener('click', async () => {
             showLoading();
@@ -205,9 +267,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                     consumeBtn.innerHTML = 'Stop Consuming';
                     consumeBtn.style.backgroundColor = '#dc3545';
                     consumeStarted = true;
-                    let consumingTopic = '[' + activeEnv.toUpperCase() + ' ← ' + activeTopic + ']';
+                    consumerBlinkOn = false;
                     window.refreshIntervalId = setInterval(function () {
-                        consumerTab.innerHTML = consumerTab.innerHTML === '⚫ Consumer ' + consumingTopic ? '🔴 Consumer ' + consumingTopic : '⚫ Consumer ' + consumingTopic;
+                        consumerBlinkOn = !consumerBlinkOn;
+                        renderConsumerTabBlink(consumerBlinkOn);
                     }, 1000);
     
                 } catch (error) {
@@ -218,7 +281,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     hideLoading();
                 });
                 clearInterval(window.refreshIntervalId);
-                consumerTab.innerHTML = '⚫ Consumer';
+                renderConsumerTabBlink(false);
                 let consumeBtn = document.getElementById('consumeButton');
                 consumeBtn.innerHTML = 'Start Consuming';
                 consumeBtn.style.backgroundColor = '#007bff';
@@ -257,14 +320,13 @@ function reloadProduceButton() {
     produceButton.disabled = activeTopic === '' || !validPayload;
 }
 
-const onEnvBtnClick = (btn) => {
+const onEnvChange = (envId) => {
     showLoading();
-    document.querySelectorAll('#sidebar button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
 
-    activeEnv = btn.id;
+    activeEnv = envId;
     activeTopicList = envConfig[activeEnv].topicList;
     activeTopic = '';
+    document.getElementById('envSelect').value = activeEnv;
 
     if (!consumeStarted) {
         const stopConsumeButton = document.getElementById('consumeButton');
@@ -272,38 +334,30 @@ const onEnvBtnClick = (btn) => {
     }
 
     activeMethod = 'producer';
-
-    const topicContainer = document.querySelector('#main #content #topics');
-    while (topicContainer.firstChild) {
-        topicContainer.removeChild(topicContainer.firstChild);
-    }
-    topicContainer.appendChild(document.createElement('h3')).textContent = 'TOPICS';
-
-    activeTopicList.forEach((topic, index) => {
-        setTimeout(() => {
-            buildTopicButton(topicContainer, topic);
-        }, index * 100);
-    });
+    onMethodTabClick(document.getElementById(activeMethod));
+    populateTopicSelect();
 
     reloadProduceButton();
+    updateSummaryCards();
 
     hideLoading();
 }
 
-const onTopicBtnClick = (btn) => {
+const onTopicChange = (topic) => {
     showLoading();
-    document.querySelectorAll('#main #content #topics button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeTopic = btn.id;
+    activeTopic = topic;
     const stopConsumeButton = document.getElementById('consumeButton');
-    stopConsumeButton.disabled = false;
+    if (!consumeStarted) {
+        stopConsumeButton.disabled = activeTopic === '';
+    }
     reloadProduceButton();
+    updateSummaryCards();
     hideLoading();
 }
 
 const onMethodTabClick = (tab) => {
     activeMethod = tab.id;
-    document.querySelectorAll('#main #tabs button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
     tab.classList.add('active');
 
     Object.values(method).forEach(method => {
@@ -311,22 +365,19 @@ const onMethodTabClick = (tab) => {
     });
 }
 
-const buildEnvButton = (buttonContainer, env) => {
-    const btn = document.createElement('button');
-    btn.textContent = env.label;
-    btn.id = env.id;
-    btn.onclick = () => onEnvBtnClick(btn);
-    if (env.id === activeEnv) {
-        btn.classList.add('active');
-    }
-    buttonContainer.appendChild(btn);
-}
-
 const buildMethodTab = (methodTabContainer, method) => {
     const tab = document.createElement('button');
-    tab.textContent = method.label;
     tab.id = method.id;
     tab.classList.add('tab');
+    const label = document.createElement('span');
+    label.classList.add('tab-label');
+    label.textContent = method.label;
+    tab.appendChild(label);
+    if (method.id === 'consumer') {
+        const status = document.createElement('span');
+        status.classList.add('tab-status');
+        tab.appendChild(status);
+    }
     tab.onclick = () => onMethodTabClick(tab);
     if (method.id === activeMethod) {
         tab.classList.add('active');
@@ -334,16 +385,24 @@ const buildMethodTab = (methodTabContainer, method) => {
     methodTabContainer.appendChild(tab);
 }
 
-const buildTopicButton = (topicContainer, topic) => {
-    const btn = document.createElement('button');
-    btn.classList.add('list-item');
-    btn.textContent = topic;
-    btn.id = topic;
-    btn.onclick = () => onTopicBtnClick(btn);
-    if (topic.id === activeTopic) {
-        btn.classList.add('active');
-    }
-    topicContainer.appendChild(btn);
+const populateTopicSelect = () => {
+    const topicSelect = document.getElementById('topicSelect');
+    topicSelect.innerHTML = '';
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select a topic...';
+    topicSelect.appendChild(placeholder);
+
+    activeTopicList.forEach((topic) => {
+        const option = document.createElement('option');
+        option.value = topic;
+        option.textContent = topic;
+        topicSelect.appendChild(option);
+    });
+
+    topicSelect.value = activeTopic;
+    topicSelect.onchange = (event) => onTopicChange(event.target.value);
 }
 
 const showLoading = () => {

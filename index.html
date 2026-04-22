@@ -20,7 +20,7 @@
     <script src='codemirror/javascript.min.js'></script>
     <script src='codemirror/placeholder.min.js'></script>
 </head>
-<body>
+<body data-theme="dark">
   <div id="loading-container">
       <span class="loader"></span>
   </div>
@@ -32,25 +32,66 @@
       </div>
   </div>
   <div id="container">
-      <div id="sidebar">
-      </div>
+      <aside id="sidebar">
+          <div class="brand">KSS</div>
+          <div id="tabs"></div>
+      </aside>
       <div id="main">
-          <div id="tabs">
-          </div>
+          <header id="topbar">
+              <div class="left-tools">
+                  <button class="toolbar-pill">Brokers</button>
+                  <button class="toolbar-pill">Topics</button>
+              </div>
+              <div class="right-tools">
+                  <label class="env-switcher" for="envSelect">
+                      <span>Environment</span>
+                      <select id="envSelect"></select>
+                  </label>
+                  <label class="theme-switch" for="themeToggle" title="Toggle theme">
+                      <span class="theme-mode" id="themeModeLabel">🌙 Dark</span>
+                      <input type="checkbox" id="themeToggle" />
+                      <span class="theme-slider"></span>
+                  </label>
+                  <button class="toolbar-pill active">Read-only</button>
+                  <button class="toolbar-pill">Options</button>
+              </div>
+          </header>
+          <section id="summaryCards">
+              <div class="summary-card">
+                  <span class="summary-value" id="brokerCount">0</span>
+                  <span class="summary-label">Brokers</span>
+              </div>
+              <div class="summary-card">
+                  <span class="summary-value" id="topicCount">0</span>
+                  <span class="summary-label">Topics</span>
+              </div>
+              <div class="summary-card">
+                  <span class="summary-value" id="activeEnvName">-</span>
+                  <span class="summary-label">Active Env</span>
+              </div>
+              <div class="summary-card">
+                  <span class="summary-value" id="activeTopicName">-</span>
+                  <span class="summary-label">Selected Topic</span>
+              </div>
+          </section>
           <div id="content">
               <div id="topics">
-                  <h3>TOPICS</h3>
+                  <h3>Options</h3>
+                  <label class="topic-label" for="topicSelect">Kafka topic</label>
+                  <select id="topicSelect"></select>
               </div>
               <div id="producerContainer">
+                  <div class="panel-heading">Producer Payload</div>
                   <div id="payload"></div>
-                  <div id="actions">
+                  <div class="actions">
                       <button id="formatButton" disabled>Format</button>
                       <button id="produceButton" disabled>Produce to Topic</button>
                   </div>
               </div>
               <div id="consumerContainer">
+                  <div class="panel-heading">Consumed Messages</div>
                   <div id="consumedMessages"></div>
-                  <div id="actions">
+                  <div class="actions">
                       <button id="clearMessages">Clear</button>
                       <button id="consumeButton">Start Consuming</button>
                   </div>
