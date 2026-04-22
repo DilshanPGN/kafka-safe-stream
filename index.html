@@ -62,8 +62,21 @@
                           <span class="theme-slider" aria-hidden="true"></span>
                       </span>
                   </label>
-                  <button id="readonlyToggle" class="toolbar-pill active" aria-pressed="true" title="Toggle read-only mode">Read-only</button>
-                  <button id="setupButton" class="toolbar-pill">Options</button>
+                  <button id="readonlyToggle" class="toolbar-pill toolbar-pill--icon active" type="button" aria-pressed="true" title="Read-only: consumer group locked. Click to allow editing." aria-label="Read-only mode">
+                      <svg class="readonly-toggle__icon readonly-toggle__icon--lock" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" stroke="currentColor" stroke-width="2"/>
+                          <path d="M7 11V7a5 5 0 0 1 10 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      </svg>
+                      <svg class="readonly-toggle__icon readonly-toggle__icon--edit" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                          <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                  </button>
+                  <button id="setupButton" class="toolbar-pill toolbar-pill--icon" type="button" title="Options" aria-label="Options">
+                      <svg class="toolbar-cog" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                          <path stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+                          <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+                      </svg>
+                  </button>
               </div>
           </header>
           <section id="summaryCards">
@@ -75,7 +88,7 @@
                   <span class="summary-value" id="topicCount">0</span>
                   <span class="summary-label">Topics</span>
               </div>
-              <div class="summary-card">
+              <div class="summary-card" id="summaryCardActiveEnv">
                   <span class="summary-value" id="activeEnvName">-</span>
                   <span class="summary-label">Active Env</span>
               </div>
@@ -83,7 +96,7 @@
                   <span class="summary-value" id="activeTopicName">-</span>
                   <span class="summary-label">Selected Topic</span>
               </div>
-              <div class="summary-card">
+              <div class="summary-card" id="summaryCardConsumerGroup">
                   <span class="summary-value" id="activeGroupName">-</span>
                   <span class="summary-label">Consumer Group</span>
               </div>

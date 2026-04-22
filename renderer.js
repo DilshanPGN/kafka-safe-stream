@@ -149,13 +149,16 @@ function applyReadOnlyState() {
     if (btn) {
         btn.classList.toggle('active', readOnlyMode);
         btn.setAttribute('aria-pressed', readOnlyMode ? 'true' : 'false');
-        btn.textContent = readOnlyMode ? 'Read-only' : 'Editable';
+        btn.title = readOnlyMode
+            ? 'Read-only: consumer group locked. Click to allow editing.'
+            : 'Editable: click to lock consumer group (read-only).';
+        btn.setAttribute('aria-label', readOnlyMode ? 'Read-only mode' : 'Editable mode');
     }
     const groupInput = document.getElementById('consumerGroupInput');
     if (groupInput) {
         groupInput.disabled = readOnlyMode || consumeStarted;
         groupInput.title = readOnlyMode
-            ? 'Disable Read-only mode in the topbar to edit the consumer group'
+            ? 'Click the lock in the toolbar to allow editing the consumer group'
             : '';
     }
 }
@@ -186,6 +189,17 @@ function applyActiveMethodLayout() {
     if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
     const optionsSection = document.getElementById('topics');
     if (optionsSection) optionsSection.style.display = hideTopicsChrome ? 'none' : '';
+
+    const envCard = document.getElementById('summaryCardActiveEnv');
+    const groupCard = document.getElementById('summaryCardConsumerGroup');
+    if (hideTopicsChrome) {
+        if (envCard) envCard.style.display = '';
+        if (groupCard) groupCard.style.display = '';
+    } else {
+        const hideActiveEnv = activeMethod === 'producer' || activeMethod === 'consumer';
+        if (envCard) envCard.style.display = hideActiveEnv ? 'none' : '';
+        if (groupCard) groupCard.style.display = activeMethod === 'producer' ? 'none' : '';
+    }
 }
 
 function updateSummaryCards() {
