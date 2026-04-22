@@ -205,6 +205,34 @@
                       <div id="topicsEmptyState" class="topics-empty">No topics loaded. Click Refresh to load.</div>
                   </div>
               </div>
+              <div id="consumerLagContainer">
+                  <div class="panel-heading">Consumer groups &amp; lag</div>
+                  <p class="lag-hint">Pick a topic, then load committed offsets for every consumer group in the cluster. Only groups with at least one committed offset on this topic are listed. Large clusters may take a while.</p>
+                  <div class="lag-toolbar">
+                      <label class="topic-label" for="lagTopicSelect">Topic</label>
+                      <select id="lagTopicSelect"></select>
+                      <button id="lagLoadButton" type="button" class="btn-primary">Load</button>
+                  </div>
+                  <div id="lagStatus" class="lag-status"></div>
+                  <div id="lagTableWrapper" class="topics-table-wrapper">
+                      <table id="lagTable" class="topics-table">
+                          <thead>
+                              <tr>
+                                  <th>Consumer group</th>
+                                  <th>State</th>
+                                  <th>Members</th>
+                                  <th>Clients</th>
+                                  <th>Partition</th>
+                                  <th>Committed</th>
+                                  <th>Log end</th>
+                                  <th>Lag</th>
+                              </tr>
+                          </thead>
+                          <tbody id="lagTableBody"></tbody>
+                      </table>
+                      <div id="lagEmptyState" class="topics-empty">Select a topic and click Load.</div>
+                  </div>
+              </div>
           </div>
       </div>
   </div>

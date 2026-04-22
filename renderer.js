@@ -6,6 +6,7 @@ const {
     consumeMessages,
     getTopicsAndPartitions,
     getTopicOffsets,
+    getConsumerLagOverview,
 } = require('./backend/kafka');
 const templatesApi = require('./backend/templates');
 const { expandTokens, TOKEN_DESCRIPTIONS } = require('./backend/randomTokens');
@@ -17,18 +18,23 @@ const Ajv = require('ajv');
 const method = {
     producer: {
         id: 'producer',
-        label: 'Producer',
+        label: 'Produce message',
         containerId: 'producerContainer',
     },
     consumer: {
         id: 'consumer',
-        label: 'Consumer',
+        label: 'Consume message',
         containerId: 'consumerContainer',
     },
     topicsBrowser: {
         id: 'topicsBrowser',
         label: 'Topics & Partitions',
         containerId: 'topicsBrowserContainer',
+    },
+    consumerLag: {
+        id: 'consumerLag',
+        label: 'Consumer lag',
+        containerId: 'consumerLagContainer',
     },
 };
 
@@ -62,6 +68,7 @@ let kafkaClientCache = { env: null, client: null };
 let rendererInitialized = false;
 let pendingConfigUpdate = null;
 window.refreshIntervalId = null;
+let lagTopic = '';
 
 function loadPreferences() {
     try {
@@ -184,7 +191,7 @@ function renderConsumerTabBlink(show) {
 }
 
 function applyActiveMethodLayout() {
-    const hideTopicsChrome = activeMethod === 'topicsBrowser';
+    const hideTopicsChrome = activeMethod === 'topicsBrowser' || activeMethod === 'consumerLag';
     const ribbon = document.getElementById('summaryCards');
     if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
     const optionsSection = document.getElementById('topics');
@@ -218,7 +225,9 @@ function updateSummaryCards() {
         activeEnvName.textContent = env.label || activeEnv;
     }
 
-    const selectedTopicLabel = activeMethod === 'consumer' ? consumerTopic : producerTopic;
+    const selectedTopicLabel = activeMethod === 'consumer'
+        ? consumerTopic
+        : (activeMethod === 'consumerLag' ? lagTopic : producerTopic);
     activeTopicName.textContent = selectedTopicLabel || '-';
     if (activeGroupName) activeGroupName.textContent = consumerGroup || '-';
 }
@@ -550,6 +559,7 @@ function renderTopicsTable() {
             <td class="actions-cell">
                 <button class="btn-secondary" data-action="produce">Producer</button>
                 <button class="btn-secondary" data-action="consume">Consumer</button>
+                <button class="btn-secondary" data-action="lag" title="Open Consumer lag for this topic">Lag</button>
             </td>
         `;
         tr.querySelector('[data-action="produce"]').addEventListener('click', () => {
@@ -557,6 +567,9 @@ function renderTopicsTable() {
         });
         tr.querySelector('[data-action="consume"]').addEventListener('click', () => {
             useTopic(t.name, 'consumer');
+        });
+        tr.querySelector('[data-action="lag"]').addEventListener('click', () => {
+            navigateToConsumerLag(t.name);
         });
         tbody.appendChild(tr);
     });
@@ -569,6 +582,124 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function clearLagOverviewUI(message) {
+    const body = document.getElementById('lagTableBody');
+    const empty = document.getElementById('lagEmptyState');
+    const status = document.getElementById('lagStatus');
+    if (body) body.innerHTML = '';
+    if (empty) {
+        empty.textContent = message || 'Select a topic and click Load.';
+        empty.style.display = 'block';
+    }
+    if (status) status.textContent = '';
+}
+
+function populateLagTopicSelect() {
+    const sel = document.getElementById('lagTopicSelect');
+    if (!sel) return;
+    const prev = lagTopic;
+    sel.innerHTML = '';
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = 'Select a topic…';
+    sel.appendChild(ph);
+    activeTopicList.forEach((t) => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t;
+        sel.appendChild(opt);
+    });
+    if (prev && activeTopicList.includes(prev)) {
+        lagTopic = prev;
+    } else {
+        lagTopic = '';
+    }
+    sel.value = lagTopic;
+    sel.onchange = () => {
+        lagTopic = sel.value;
+    };
+}
+
+function renderLagOverviewResult(data) {
+    const body = document.getElementById('lagTableBody');
+    const empty = document.getElementById('lagEmptyState');
+    const status = document.getElementById('lagStatus');
+    if (!body || !empty || !status) return;
+
+    status.textContent = `Scanned ${data.scannedGroupCount} groups — ${data.matchedGroupCount} with commits on "${data.topic}".`;
+
+    if (!data.groups.length) {
+        body.innerHTML = '';
+        empty.textContent = 'No consumer groups have committed offsets for this topic yet.';
+        empty.style.display = 'block';
+        return;
+    }
+
+    empty.style.display = 'none';
+    body.innerHTML = '';
+
+    for (const g of data.groups) {
+        const clients = (g.members || []).map((m) => m.clientId || m.memberId).filter(Boolean);
+        const clientsStr = clients.join(', ');
+        const clientsShort = clientsStr.length > 48 ? `${clientsStr.slice(0, 45)}…` : clientsStr;
+        for (const pr of g.partitions) {
+            const tr = document.createElement('tr');
+            const committedCell = pr.committedDisplay === null ? '—' : escapeHtml(pr.committedDisplay);
+            const lagCell = pr.lag === null ? '—' : escapeHtml(String(pr.lag));
+            const clientsTitle = escapeHtml(clientsStr);
+            const clientsBody = clientsShort ? escapeHtml(clientsShort) : '—';
+            tr.innerHTML = `
+                <td class="topic-cell">${escapeHtml(g.groupId)}</td>
+                <td>${escapeHtml(String(g.state))}</td>
+                <td>${g.memberCount}</td>
+                <td class="lag-clients-cell" title="${clientsTitle}">${clientsBody}</td>
+                <td>${pr.partition}</td>
+                <td>${committedCell}</td>
+                <td>${escapeHtml(String(pr.logEnd))}</td>
+                <td>${lagCell}</td>
+            `;
+            body.appendChild(tr);
+        }
+    }
+}
+
+async function loadConsumerLagOverview() {
+    if (!lagTopic) {
+        showAlert('Consumer lag', 'Please select a topic.');
+        return;
+    }
+    const status = document.getElementById('lagStatus');
+    if (status) status.textContent = 'Loading…';
+    showLoading();
+    try {
+        const kafka = await getKafkaClient();
+        const data = await getConsumerLagOverview(kafka, lagTopic);
+        renderLagOverviewResult(data);
+    } catch (err) {
+        showAlert('Consumer lag', err.message);
+        clearLagOverviewUI();
+    } finally {
+        hideLoading();
+    }
+}
+
+async function navigateToConsumerLag(topicName) {
+    if (!topicName) return;
+    if (!activeTopicList.includes(topicName)) {
+        activeTopicList = [...activeTopicList, topicName];
+    }
+    lagTopic = topicName;
+    populateTopicSelect();
+    clearLagOverviewUI();
+    onMethodTabClick(document.getElementById('consumerLag'));
+    await loadConsumerLagOverview();
+}
+
+function wireLagOverviewControls() {
+    const btn = document.getElementById('lagLoadButton');
+    if (btn) btn.addEventListener('click', () => loadConsumerLagOverview());
 }
 
 function ensureTopicInList(topicName) {
@@ -724,6 +855,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         wireConsumerControls();
         wireTemplateControls();
         wireTopicsBrowserControls();
+        wireLagOverviewControls();
         wireSetupButton();
         rendererInitialized = true;
         if (pendingConfigUpdate) {
@@ -972,6 +1104,9 @@ const onEnvChange = (envId) => {
     activeMethod = 'producer';
     onMethodTabClick(document.getElementById(activeMethod));
     populateTopicSelect();
+    lagTopic = '';
+    populateLagTopicSelect();
+    clearLagOverviewUI();
 
     topicsCache = [];
     kafkaClientCache = { env: null, client: null };
@@ -1023,10 +1158,14 @@ const onMethodTabClick = (tab) => {
         loadTopicsBrowser(true);
     }
 
+    if (tab.id === 'consumerLag') {
+        populateLagTopicSelect();
+    }
+
     applyActiveMethodLayout();
 
     const topicSelect = document.getElementById('topicSelect');
-    if (topicSelect && tab.id !== 'topicsBrowser') {
+    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag') {
         topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
     }
 

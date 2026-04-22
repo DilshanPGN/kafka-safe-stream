@@ -901,6 +901,57 @@ body {
     overflow: hidden;
 }
 
+#consumerLagContainer {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.lag-hint {
+    margin: 0 0 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--color-text-muted);
+}
+
+.lag-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.lag-toolbar #lagTopicSelect {
+    min-width: 220px;
+    height: 34px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+    padding: 0 12px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lag-status {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-subtle);
+    margin-bottom: 8px;
+    min-height: 18px;
+}
+
+.lag-clients-cell {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .topics-toolbar {
     display: flex;
     flex-wrap: wrap;

@@ -86,6 +86,146 @@ async function getTopicOffsets(kafka, topic) {
     }
 }
 
+function parseCommittedOffset(offset) {
+    if (offset === undefined || offset === null) return null;
+    const n = Number(offset);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return n;
+}
+
+function chunkArray(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) {
+        out.push(arr.slice(i, i + size));
+    }
+    return out;
+}
+
+/**
+ * List consumer groups that have at least one committed offset for the topic,
+ * with log end / lag per partition and describeGroups metadata.
+ */
+async function getConsumerLagOverview(kafka, topicName) {
+    if (!topicName || typeof topicName !== 'string') {
+        throw new Error('Topic is required');
+    }
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+
+        const topicOffsetRows = await admin.fetchTopicOffsets(topicName);
+        const byPartition = new Map();
+        for (const row of topicOffsetRows) {
+            const p = Number(row.partition);
+            const high = Number(row.high !== undefined ? row.high : row.offset);
+            const low = Number(row.low !== undefined ? row.low : 0);
+            byPartition.set(p, { high, low });
+        }
+
+        const listResult = await admin.listGroups();
+        const rawIds = (listResult.groups || []).map((g) => g.groupId).filter(Boolean);
+        const groupIds = [...new Set(rawIds)];
+
+        const FETCH_CONCURRENCY = 10;
+        const rawGroups = [];
+
+        for (let i = 0; i < groupIds.length; i += FETCH_CONCURRENCY) {
+            const slice = groupIds.slice(i, i + FETCH_CONCURRENCY);
+            const settled = await Promise.all(
+                slice.map(async (groupId) => {
+                    try {
+                        const blocks = await admin.fetchOffsets({ groupId, topics: [topicName] });
+                        const block = blocks.find((b) => b.topic === topicName);
+                        if (!block || !Array.isArray(block.partitions)) {
+                            return { groupId, error: null, partitionRows: [] };
+                        }
+                        const partitionRows = block.partitions.map((pr) => {
+                            const partition = Number(pr.partition);
+                            const meta = byPartition.get(partition) || { high: 0, low: 0 };
+                            const committedRaw = pr.offset;
+                            const committed = parseCommittedOffset(committedRaw);
+                            let lag = null;
+                            if (committed !== null && Number.isFinite(meta.high)) {
+                                lag = Math.max(0, meta.high - committed);
+                            }
+                            return {
+                                partition,
+                                committedDisplay:
+                                    committed === null
+                                        ? null
+                                        : String(committedRaw),
+                                committed,
+                                logEnd: meta.high,
+                                logStart: meta.low,
+                                lag,
+                            };
+                        });
+                        return { groupId, error: null, partitionRows };
+                    } catch (err) {
+                        return { groupId, error: err.message || String(err), partitionRows: [] };
+                    }
+                })
+            );
+            rawGroups.push(...settled);
+        }
+
+        const withCommits = rawGroups.filter(
+            (g) =>
+                !g.error &&
+                g.partitionRows.some((pr) => pr.committed !== null)
+        );
+
+        const describeMap = new Map();
+        for (const batch of chunkArray(
+            withCommits.map((g) => g.groupId),
+            10
+        )) {
+            if (batch.length === 0) continue;
+            try {
+                const { groups: descGroups } = await admin.describeGroups(batch);
+                for (const g of descGroups || []) {
+                    describeMap.set(g.groupId, g);
+                }
+            } catch (_) {
+                /* describe is best-effort */
+            }
+        }
+
+        const groups = withCommits.map((g) => {
+            const d = describeMap.get(g.groupId) || {};
+            const members = (d.members || []).map((m) => ({
+                memberId: m.memberId,
+                clientId: m.clientId,
+                host: m.host,
+            }));
+            let totalLag = 0;
+            for (const pr of g.partitionRows) {
+                if (typeof pr.lag === 'number') totalLag += pr.lag;
+            }
+            return {
+                groupId: g.groupId,
+                state: d.state || '—',
+                protocolType: d.protocolType || '',
+                memberCount: members.length,
+                members,
+                totalLag,
+                partitions: g.partitionRows,
+            };
+        });
+
+        groups.sort((a, b) => b.totalLag - a.totalLag);
+
+        return {
+            topic: topicName,
+            scannedGroupCount: groupIds.length,
+            matchedGroupCount: groups.length,
+            groups,
+        };
+    } finally {
+        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+    }
+}
+
 async function consumeMessages(kafka, options, onMessage, onDone) {
     const {
         topic,
@@ -197,4 +337,5 @@ module.exports = {
     stopConsuming,
     getTopicsAndPartitions,
     getTopicOffsets,
+    getConsumerLagOverview,
 };
