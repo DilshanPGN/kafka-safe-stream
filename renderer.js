@@ -10,7 +10,7 @@ const {
     getClusterMetadata,
 } = require('./backend/kafka');
 const templatesApi = require('./backend/templates');
-const { expandTokens, TOKEN_DESCRIPTIONS } = require('./backend/randomTokens');
+const { expandTokens, TOKEN_INSERT_OPTIONS } = require('./backend/randomTokens');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -417,19 +417,30 @@ function populateTokenInsert() {
     placeholder.value = '';
     placeholder.textContent = 'Insert token…';
     select.appendChild(placeholder);
-    TOKEN_DESCRIPTIONS.forEach((td) => {
-        const opt = document.createElement('option');
-        opt.value = td.token;
-        opt.textContent = `${td.token}  —  ${td.label}`;
-        select.appendChild(opt);
-    });
-    select.addEventListener('change', () => {
+    const byGroup = new Map();
+    for (const row of TOKEN_INSERT_OPTIONS) {
+        const g = row.group || 'Other';
+        if (!byGroup.has(g)) byGroup.set(g, []);
+        byGroup.get(g).push(row);
+    }
+    for (const [groupName, rows] of byGroup) {
+        const og = document.createElement('optgroup');
+        og.label = groupName;
+        for (const td of rows) {
+            const opt = document.createElement('option');
+            opt.value = td.token;
+            opt.textContent = `${td.token}  —  ${td.label}`;
+            og.appendChild(opt);
+        }
+        select.appendChild(og);
+    }
+    select.onchange = () => {
         const token = select.value;
         if (!token || !editor) return;
         editor.replaceSelection(token);
         select.value = '';
         editor.focus();
-    });
+    };
 }
 
 function showPrompt(title, message, defaultValue = '') {
