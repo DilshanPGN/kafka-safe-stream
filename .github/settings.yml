@@ -1,0 +1,31 @@
+repository:
+  private: false
+  has_issues: true
+  has_projects: true
+  has_wiki: false
+  delete_branch_on_merge: true
+  allow_merge_commit: false
+  allow_squash_merge: true
+  allow_rebase_merge: true
+  enable_automated_security_fixes: true
+  enable_vulnerability_alerts: true
+  security_and_analysis:
+    secret_scanning:
+      status: enabled
+    secret_scanning_push_protection:
+      status: enabled
+
+branches:
+  - name: master
+    protection:
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+      required_status_checks:
+        strict: true
+        contexts: []
+      enforce_admins: true
+      required_linear_history: true
+      allow_force_pushes: false
+      allow_deletions: false
+      required_conversation_resolution: true
