@@ -17,6 +17,7 @@
     <script src="./renderer.js"></script>
     <script src='codemirror/codemirror.min.js'></script>
     <script src='codemirror/javascript.min.js'></script>
+    <script src='codemirror/xml.min.js'></script>
     <script src='codemirror/placeholder.min.js'></script>
 </head>
 <body data-theme="dark">
@@ -131,6 +132,12 @@
                   </div>
                   <div class="options-section" id="optionsProducerSection">
                       <h4 class="options-subheading">Producer template</h4>
+                      <label class="topic-label" for="producerFormatSelect">Format</label>
+                      <select id="producerFormatSelect" class="format-select">
+                          <option value="json">JSON</option>
+                          <option value="xml">XML</option>
+                          <option value="text">Plain text</option>
+                      </select>
                       <div class="template-toolbar">
                           <label class="topic-label" for="templateSelect">Template</label>
                           <select id="templateSelect">
@@ -150,6 +157,16 @@
                   <div class="options-section" id="optionsConsumerSection">
                       <h4 class="options-subheading">Consumer</h4>
                       <div class="consumer-controls options-consumer-controls">
+                          <div class="control-row">
+                              <label class="control-inline format-inline">
+                                  <span>Display format</span>
+                                  <select id="consumerFormatSelect" class="format-select">
+                                      <option value="json">JSON</option>
+                                      <option value="xml">XML</option>
+                                      <option value="text">Plain text</option>
+                                  </select>
+                              </label>
+                          </div>
                           <div class="control-row">
                               <span class="control-label">Start from</span>
                               <div class="radio-group" id="startModeGroup">

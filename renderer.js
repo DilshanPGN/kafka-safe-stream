@@ -67,6 +67,15 @@ const THEME_STORAGE_KEY = 'kss-theme';
 const READONLY_STORAGE_KEY = 'kss-readonly';
 const PREFS_PATH = path.join(os.homedir(), '.kss', 'preferences.json');
 
+const PAYLOAD_FORMATS = {
+    json: { id: 'json', label: 'JSON', cmMode: { name: 'javascript', json: true } },
+    xml: { id: 'xml', label: 'XML', cmMode: 'xml' },
+    text: { id: 'text', label: 'Plain text', cmMode: null },
+};
+const DEFAULT_FORMAT = 'json';
+const PRODUCER_FORMAT_STORAGE_KEY = 'kss-producer-format';
+const CONSUMER_FORMAT_STORAGE_KEY = 'kss-consumer-format';
+
 let activeEnv = null;
 let activeMethod = 'producer';
 let activeTopicList = null;
@@ -83,6 +92,8 @@ let consumerGroup = DEFAULT_GROUP;
 let topicsCache = [];
 let consumedMessages = [];
 let selectedTemplateId = '';
+let producerFormat = DEFAULT_FORMAT;
+let consumerFormat = DEFAULT_FORMAT;
 let kafkaClientCache = { env: null, client: null };
 let rendererInitialized = false;
 let pendingConfigUpdate = null;
@@ -370,13 +381,139 @@ function initializeConsumer() {
     });
 }
 
+function validatePayload(format, text) {
+    if (format === 'text') return true;
+    const raw = text == null ? '' : String(text);
+    if (format === 'json') {
+        try {
+            JSON.parse(raw);
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+    if (format === 'xml') {
+        const trimmed = raw.trim();
+        if (!trimmed) return false;
+        const doc = new DOMParser().parseFromString(raw, 'application/xml');
+        return !doc.querySelector('parsererror');
+    }
+    return false;
+}
+
+function formatPayloadXml(text) {
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.querySelector('parsererror')) throw new Error('Invalid XML');
+
+    function escAttr(v) {
+        return String(v)
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;');
+    }
+
+    function walk(node, depth) {
+        const pad = '  '.repeat(depth);
+        if (node.nodeType === 3) {
+            const t = node.textContent;
+            if (!t || !t.trim()) return '';
+            return `${pad}${t.trim()}\n`;
+        }
+        if (node.nodeType !== 1) return '';
+        let out = '';
+        let attrs = '';
+        for (let i = 0; i < node.attributes.length; i += 1) {
+            const a = node.attributes[i];
+            attrs += ` ${a.name}="${escAttr(a.value)}"`;
+        }
+        const childEls = [...node.childNodes].filter((n) => n.nodeType === 1);
+        const textNodes = [...node.childNodes].filter((n) => n.nodeType === 3);
+        const textJoined = textNodes.map((n) => n.textContent.trim()).filter(Boolean).join(' ');
+        if (!childEls.length && !textJoined) {
+            return `${pad}<${node.nodeName}${attrs}/>\n`;
+        }
+        out += `${pad}<${node.nodeName}${attrs}>\n`;
+        if (textJoined) out += `${'  '.repeat(depth + 1)}${textJoined}\n`;
+        for (const ch of childEls) out += walk(ch, depth + 1);
+        out += `${pad}</${node.nodeName}>\n`;
+        return out;
+    }
+
+    return walk(doc.documentElement, 0).trimEnd();
+}
+
+function formatPayload(format, text) {
+    if (format === 'json') {
+        return JSON.stringify(JSON.parse(text), null, 2);
+    }
+    if (format === 'xml') {
+        return formatPayloadXml(text);
+    }
+    return text;
+}
+
+function applyEditorMode(cmEditor, formatId) {
+    const spec = PAYLOAD_FORMATS[formatId] || PAYLOAD_FORMATS[DEFAULT_FORMAT];
+    if (!cmEditor) return;
+    cmEditor.setOption('mode', spec.cmMode);
+}
+
+function revalidateProducerPayload() {
+    const formatButton = document.getElementById('formatButton');
+    if (!editor) return;
+    const text = editor.getValue();
+    validPayload = validatePayload(producerFormat, text);
+    if (formatButton) {
+        formatButton.disabled = !validPayload || producerFormat === 'text';
+    }
+    reloadProduceButton();
+}
+
+function applyProducerFormat(format, { skipStorage } = {}) {
+    const id = PAYLOAD_FORMATS[format] ? format : DEFAULT_FORMAT;
+    producerFormat = id;
+    const sel = document.getElementById('producerFormatSelect');
+    if (sel) sel.value = producerFormat;
+    if (editor) applyEditorMode(editor, producerFormat);
+    revalidateProducerPayload();
+    if (!skipStorage) {
+        try {
+            window.localStorage.setItem(PRODUCER_FORMAT_STORAGE_KEY, producerFormat);
+        } catch (_) { /* ignore */ }
+    }
+}
+
+function applyConsumerFormat(format, { skipStorage } = {}) {
+    const id = PAYLOAD_FORMATS[format] ? format : DEFAULT_FORMAT;
+    consumerFormat = id;
+    const sel = document.getElementById('consumerFormatSelect');
+    if (sel) sel.value = consumerFormat;
+    if (consumer) applyEditorMode(consumer, consumerFormat);
+    applyFilter();
+    if (!skipStorage) {
+        try {
+            window.localStorage.setItem(CONSUMER_FORMAT_STORAGE_KEY, consumerFormat);
+        } catch (_) { /* ignore */ }
+    }
+}
+
 function formatConsumedEntry(msg) {
     let body = msg.value;
-    try {
-        body = JSON.stringify(JSON.parse(msg.value), null, 2);
-    } catch (_) { /* keep as-is */ }
-    const meta = `// partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
+    if (consumerFormat === 'json') {
+        try {
+            body = JSON.stringify(JSON.parse(msg.value), null, 2);
+        } catch (_) { /* keep as-is */ }
+    }
+    const metaLine = `partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
         (msg.key ? ` key=${msg.key}` : '');
+    let meta;
+    if (consumerFormat === 'xml') {
+        meta = `<!-- ${metaLine} -->`;
+    } else if (consumerFormat === 'text') {
+        meta = `# ${metaLine}`;
+    } else {
+        meta = `// ${metaLine}`;
+    }
     return `${meta}\n${body}`;
 }
 
@@ -1031,6 +1168,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         const envSelect = document.getElementById('envSelect');
         const formatButton = document.getElementById('formatButton');
 
+        const producerFormatSelect = document.getElementById('producerFormatSelect');
+        if (producerFormatSelect) {
+            producerFormatSelect.addEventListener('change', (e) => {
+                applyProducerFormat(e.target.value);
+            });
+        }
+        let storedProducerFormat = null;
+        try {
+            storedProducerFormat = window.localStorage.getItem(PRODUCER_FORMAT_STORAGE_KEY);
+        } catch (_) { /* ignore */ }
+        applyProducerFormat(PAYLOAD_FORMATS[storedProducerFormat] ? storedProducerFormat : DEFAULT_FORMAT, { skipStorage: true });
+
         Object.values(envConfig).forEach((env) => {
             const option = document.createElement('option');
             option.value = env.id;
@@ -1131,28 +1280,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
 
         document.getElementById('payload').addEventListener('keyup', () => {
-            try {
-                JSON.parse(editor.getValue());
-                validPayload = true;
-                formatButton.disabled = false;
-            } catch (_) {
-                validPayload = false;
-                formatButton.disabled = true;
-            }
-            reloadProduceButton();
+            revalidateProducerPayload();
+        });
+        document.getElementById('payload').addEventListener('input', () => {
+            revalidateProducerPayload();
         });
 
         formatButton.addEventListener('click', () => {
             try {
-                const formatted = JSON.stringify(JSON.parse(editor.getValue()), null, 2);
+                const formatted = formatPayload(producerFormat, editor.getValue());
                 editor.setValue(formatted);
             } catch (error) {
-                showAlert('JSON Format Error', 'Error formatting JSON. Please check the JSON and try again.');
+                const label = (PAYLOAD_FORMATS[producerFormat] || PAYLOAD_FORMATS[DEFAULT_FORMAT]).label;
+                showAlert(`${label} format error`, error.message || 'Could not format the payload.');
             }
-            reloadProduceButton();
+            revalidateProducerPayload();
         });
 
         wireConsumerControls();
+        let storedConsumerFormat = null;
+        try {
+            storedConsumerFormat = window.localStorage.getItem(CONSUMER_FORMAT_STORAGE_KEY);
+        } catch (_) { /* ignore */ }
+        applyConsumerFormat(PAYLOAD_FORMATS[storedConsumerFormat] ? storedConsumerFormat : DEFAULT_FORMAT, { skipStorage: true });
+
         wireTemplateControls();
         wireTopicsBrowserControls();
         wireLagOverviewControls();
@@ -1244,6 +1395,13 @@ function wireConsumerControls() {
             }
         });
     }
+
+    const consumerFormatSelect = document.getElementById('consumerFormatSelect');
+    if (consumerFormatSelect) {
+        consumerFormatSelect.addEventListener('change', (e) => {
+            applyConsumerFormat(e.target.value);
+        });
+    }
 }
 
 function wireTemplateControls() {
@@ -1265,15 +1423,7 @@ function wireTemplateControls() {
             const tpl = templatesApi.getTemplate(selectedTemplateId);
             if (tpl && editor) {
                 editor.setValue(tpl.payload || '');
-                try {
-                    JSON.parse(editor.getValue());
-                    validPayload = true;
-                    document.getElementById('formatButton').disabled = false;
-                } catch (_) {
-                    validPayload = false;
-                    document.getElementById('formatButton').disabled = true;
-                }
-                reloadProduceButton();
+                applyProducerFormat(tpl.format || DEFAULT_FORMAT, { skipStorage: true });
             }
         });
     }
@@ -1282,7 +1432,11 @@ function wireTemplateControls() {
             const name = await showPrompt('Save template', 'Template name:', '');
             if (!name) return;
             try {
-                const tpl = templatesApi.saveTemplate({ name, payload: editor ? editor.getValue() : '' });
+                const tpl = templatesApi.saveTemplate({
+                    name,
+                    payload: editor ? editor.getValue() : '',
+                    format: producerFormat,
+                });
                 selectedTemplateId = tpl.id;
                 refreshTemplateSelect();
             } catch (err) {
@@ -1296,6 +1450,7 @@ function wireTemplateControls() {
             try {
                 templatesApi.updateTemplate(selectedTemplateId, {
                     payload: editor ? editor.getValue() : '',
+                    format: producerFormat,
                 });
                 refreshTemplateSelect();
             } catch (err) {
@@ -1379,6 +1534,7 @@ async function reapplyConfig(newConfig) {
 
 function reloadProduceButton() {
     const produceButton = document.getElementById('produceButton');
+    if (!produceButton) return;
     produceButton.disabled = producerTopic === '' || !validPayload;
 }
 
