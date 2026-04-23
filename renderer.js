@@ -131,7 +131,12 @@ function savePreferences(prefs) {
 }
 
 /**
- * Consumer background-idle prompt. Stored in preferences.json (~/.kss/preferences.json).
+ * preferences.json (~/.kss/preferences.json) also stores:
+ * - lastActiveEnvId — environment restored on startup
+ * - lastActiveMethodByEnv — map of env id → last main tab (producer, consumer, …)
+ * - lastActiveMethod — global fallback for the active tab
+ *
+ * Consumer background-idle:
  * consumerIdle.blurUnfocusedMinutes — unfocused time before "still there?" (default 60 = 1 hour).
  * consumerIdle.promptResponseMinutes — countdown before auto-stop if no confirmation (default 3).
  */
@@ -159,6 +164,42 @@ function setGroupForTopic(envId, topic, group) {
     const prefs = loadPreferences();
     prefs.groupsByTopic = prefs.groupsByTopic || {};
     prefs.groupsByTopic[`${envId}::${topic}`] = group;
+    savePreferences(prefs);
+}
+
+function readLastMethodForEnv(envId) {
+    const prefs = loadPreferences();
+    const byEnv = prefs.lastActiveMethodByEnv;
+    let cand = (byEnv && typeof byEnv === 'object' && byEnv[envId]) || prefs.lastActiveMethod || 'producer';
+    cand = String(cand);
+    if (!method[cand]) cand = 'producer';
+    return cand;
+}
+
+function resolveMethodForEnv(envId) {
+    let m = readLastMethodForEnv(envId);
+    if (!isMethodVisibleInAppMode(method[m])) {
+        const visible = Object.values(method).filter(isMethodVisibleInAppMode);
+        m = visible[0] ? visible[0].id : 'producer';
+    }
+    return m;
+}
+
+function persistLastMethodForEnv(envId, methodId) {
+    if (!envId || !methodId) return;
+    const prefs = loadPreferences();
+    prefs.lastActiveMethodByEnv = prefs.lastActiveMethodByEnv && typeof prefs.lastActiveMethodByEnv === 'object'
+        ? prefs.lastActiveMethodByEnv
+        : {};
+    prefs.lastActiveMethodByEnv[envId] = methodId;
+    prefs.lastActiveMethod = methodId;
+    savePreferences(prefs);
+}
+
+function persistLastEnv(envId) {
+    if (!envId) return;
+    const prefs = loadPreferences();
+    prefs.lastActiveEnvId = envId;
     savePreferences(prefs);
 }
 
@@ -1472,8 +1513,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     initializeAppModeToggle();
     showLoading();
     loadConfig().then(() => {
-        activeEnv = Object.keys(envConfig)[0];
+        const envIds = Object.keys(envConfig);
+        const prefs = loadPreferences();
+        const savedEnv = prefs.lastActiveEnvId;
+        activeEnv = (savedEnv && envIds.includes(savedEnv)) ? savedEnv : envIds[0];
         activeTopicList = (envConfig[activeEnv].topicList || []).slice();
+        activeMethod = resolveMethodForEnv(activeEnv);
 
         initializeEditor();
         initializeConsumer();
@@ -1881,8 +1926,14 @@ const onEnvChange = (envId) => {
         stopConsumeButton.disabled = true;
     }
 
-    activeMethod = 'producer';
-    onMethodTabClick(document.getElementById(activeMethod));
+    activeMethod = resolveMethodForEnv(activeEnv);
+    const methodTab = document.getElementById(activeMethod);
+    if (methodTab) {
+        onMethodTabClick(methodTab);
+    } else {
+        activeMethod = 'producer';
+        onMethodTabClick(document.getElementById('producer'));
+    }
     populateTopicSelect();
     lagTopic = '';
     populateLagTopicSelect();
@@ -1895,6 +1946,7 @@ const onEnvChange = (envId) => {
     updateSummaryCards();
     applyConsumerGroupFieldState();
 
+    persistLastEnv(activeEnv);
     hideLoading();
 };
 
@@ -1927,6 +1979,9 @@ const onTopicChange = (topic, methodId) => {
 
 const onMethodTabClick = (tab) => {
     activeMethod = tab.id;
+    if (activeEnv) {
+        persistLastMethodForEnv(activeEnv, activeMethod);
+    }
     document.querySelectorAll('#tabs button').forEach((b) => b.classList.remove('active'));
     tab.classList.add('active');
 
