@@ -488,7 +488,7 @@ function initializeEditor() {
         autofocus: true,
         mode: { name: 'javascript', json: true },
         theme: 'default',
-        placeholder: 'Enter a JSON payload...',
+        placeholder: 'Enter the payload...',
     });
 }
 
@@ -2549,9 +2549,9 @@ function closeAlert() {
 }
 
 const OPTIONS_WIDTH_STORAGE_KEY = 'kss-options-width';
-const OPTIONS_WIDTH_MIN = 260;
+const OPTIONS_WIDTH_MIN = 268;
 const OPTIONS_WIDTH_MAX = 560;
-const OPTIONS_WIDTH_DEFAULT = 340;
+const OPTIONS_WIDTH_DEFAULT = 352;
 
 function clampOptionsWidth(value) {
     const num = Number(value);

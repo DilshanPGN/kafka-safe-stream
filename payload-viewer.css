@@ -24,7 +24,7 @@ body {
     border-radius: 8px;
     background: var(--color-bg-soft);
     color: var(--color-text);
-    font-size: 13px;
+    font-size: clamp(14px, 0.35vw + 12px, 17px);
     line-height: 1.6;
 }
 
