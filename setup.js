@@ -210,6 +210,7 @@ function renderEnvPanel() {
     const available = topicNames.filter(
         (name) => !env.topicList.includes(name) && (!term || name.toLowerCase().includes(term)),
     );
+    const brokersHave = brokerListFromInput(env.brokersText).length > 0;
 
     let probeHtml = '';
     if (probeInFlight) {
@@ -222,23 +223,44 @@ function renderEnvPanel() {
         probeHtml = '<span class="probe-status">Run <strong>Test connection</strong> to verify brokers and load topic names.</span>';
     }
 
-    const topicSectionHidden = !clusterOk ? ' style="display:none"' : '';
+    const probeCtaHint = (brokersHave && !clusterOk && !probeInFlight)
+        ? '<p class="probe-cta-hint">Test connection is required to load topic names from the cluster for this environment.</p>'
+        : '';
 
-    let availableRows = '';
+    let clusterTopicBody = '';
     if (clusterOk) {
         if (!available.length) {
-            availableRows = '<div class="topic-row-muted">No matching topics, or all visible topics are already saved.</div>';
+            clusterTopicBody = `
+                <input type="search" class="topic-search" id="topicFilterInput" placeholder="Search topics…" value="${escapeHtml(env.topicFilter)}" />
+                <div class="topic-scroll" id="clusterTopicScroll"><div class="topic-row-muted">No matching topics, or all visible topics are already saved.</div></div>
+            `;
         } else {
-            availableRows = available.slice(0, 400).map((name) => `
+            const availableRows = available.slice(0, 400).map((name) => `
                 <div class="topic-row">
                     <span class="topic-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
                     <button type="button" class="btn btn-secondary btn-small" data-add-topic="${encodeURIComponent(name)}">Add</button>
                 </div>
             `).join('');
-            if (available.length > 400) {
-                availableRows += `<div class="topic-row-muted">Showing first 400 matches. Refine search.</div>`;
-            }
+            const capNote = available.length > 400
+                ? '<div class="topic-row-muted">Showing first 400 matches. Refine search.</div>'
+                : '';
+            clusterTopicBody = `
+                <input type="search" class="topic-search" id="topicFilterInput" placeholder="Search topics…" value="${escapeHtml(env.topicFilter)}" />
+                <div class="topic-scroll" id="clusterTopicScroll">${availableRows}${capNote}</div>
+            `;
         }
+    } else {
+        const failNote = (probe && !probe.ok)
+            ? '<p>Fix the broker list if needed, then run <strong>Test connection</strong> again. Loading topics does not change your cluster.</p>'
+            : '<p>Run <strong>Test connection</strong> above (or below) to load topic names from the broker. This only reads metadata; it does not create or delete topics.</p>';
+        clusterTopicBody = `
+            <div class="topic-scroll topic-scroll--placeholder" id="clusterTopicScroll">
+                <div class="topic-placeholder-inner">
+                    ${failNote}
+                    <button type="button" class="btn btn-secondary" id="testConnBtnPlaceholder"${probeInFlight ? ' disabled' : ''}>Test connection</button>
+                </div>
+            </div>
+        `;
     }
 
     const savedChips = env.topicList.length
@@ -251,36 +273,42 @@ function renderEnvPanel() {
         : '<div class="topic-row-muted">No topics saved yet. Add from the list on the left.</div>';
 
     panel.innerHTML = `
-        <div class="two-col">
-            <div class="field">
-                <label for="envIdInput">Environment id</label>
-                <input type="text" id="envIdInput" autocomplete="off" placeholder="e.g. dev" value="${escapeHtml(env.id)}" />
-                <p class="field-hint">Letters, numbers, underscore, hyphen. Used as the config key.</p>
-            </div>
-            <div class="field">
-                <label for="envLabelInput">Display name</label>
-                <input type="text" id="envLabelInput" autocomplete="off" placeholder="e.g. Development" value="${escapeHtml(env.label)}" />
-            </div>
-        </div>
-        <div class="field">
-            <label for="envBrokersInput">Bootstrap brokers</label>
-            <textarea id="envBrokersInput" placeholder="localhost:9092&#10;broker2:9092">${escapeHtml(env.brokersText)}</textarea>
-            <p class="field-hint">One host:port per line, or comma-separated.</p>
-        </div>
-        <div class="probe-row">
-            <button type="button" id="testConnBtn" class="btn btn-secondary"${probeInFlight ? ' disabled' : ''}>Test connection</button>
-            ${probeHtml}
-        </div>
-        <div id="topicSection"${topicSectionHidden}>
-            <div class="topic-columns">
-                <div class="topic-panel">
-                    <h3>Cluster topics</h3>
-                    <input type="search" class="topic-search" id="topicFilterInput" placeholder="Search topics…" value="${escapeHtml(env.topicFilter)}" />
-                    <div class="topic-scroll" id="clusterTopicScroll">${availableRows}</div>
+        <div class="env-panel-inner">
+            <div class="env-panel-form">
+                <div class="two-col">
+                    <div class="field">
+                        <label for="envIdInput">Environment id</label>
+                        <input type="text" id="envIdInput" autocomplete="off" placeholder="e.g. dev" value="${escapeHtml(env.id)}" />
+                        <p class="field-hint">Letters, numbers, underscore, hyphen. Used as the config key.</p>
+                    </div>
+                    <div class="field">
+                        <label for="envLabelInput">Display name</label>
+                        <input type="text" id="envLabelInput" autocomplete="off" placeholder="e.g. Development" value="${escapeHtml(env.label)}" />
+                    </div>
                 </div>
-                <div class="topic-panel">
-                    <h3>Saved topics (configuration)</h3>
-                    <div class="chip-list" id="savedTopicsList">${savedChips}</div>
+                <div class="field">
+                    <label for="envBrokersInput">Bootstrap brokers</label>
+                    <textarea id="envBrokersInput" placeholder="localhost:9092&#10;broker2:9092">${escapeHtml(env.brokersText)}</textarea>
+                    <p class="field-hint">One host:port per line, or comma-separated.</p>
+                </div>
+                <div class="probe-block">
+                    <div class="probe-row">
+                        <button type="button" id="testConnBtn" class="btn btn-secondary"${probeInFlight ? ' disabled' : ''}>Test connection</button>
+                        ${probeHtml}
+                    </div>
+                    ${probeCtaHint}
+                </div>
+            </div>
+            <div id="topicSection" class="topic-section">
+                <div class="topic-columns">
+                    <div class="topic-panel">
+                        <h3>Cluster topics</h3>
+                        ${clusterTopicBody}
+                    </div>
+                    <div class="topic-panel">
+                        <h3>Saved topics (configuration)</h3>
+                        <div class="chip-list" id="savedTopicsList">${savedChips}</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -344,7 +372,7 @@ function renderEnvPanel() {
         });
     });
 
-    document.getElementById('testConnBtn').addEventListener('click', async () => {
+    async function handleTestConnection() {
         if (probeInFlight) return;
         probeInFlight = true;
         renderEnvPanel();
@@ -356,7 +384,13 @@ function renderEnvPanel() {
         }
         syncJsonTextarea();
         renderEnvPanel();
-    });
+    }
+
+    document.getElementById('testConnBtn').addEventListener('click', handleTestConnection);
+    const testPlaceholder = document.getElementById('testConnBtnPlaceholder');
+    if (testPlaceholder) {
+        testPlaceholder.addEventListener('click', handleTestConnection);
+    }
 
     if (focusId) {
         const el = document.getElementById(focusId);
