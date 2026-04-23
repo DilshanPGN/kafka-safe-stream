@@ -118,26 +118,69 @@
           <div id="content">
               <div id="topics">
                   <h3>Options</h3>
-                  <label class="topic-label" for="topicSelect">Kafka topic</label>
-                  <select id="topicSelect"></select>
+                  <div class="options-section" id="optionsTopicSection">
+                      <h4 class="options-subheading">Topic</h4>
+                      <label class="topic-label" for="topicSelect">Kafka topic</label>
+                      <select id="topicSelect"></select>
+                  </div>
+                  <div class="options-section" id="optionsProducerSection">
+                      <h4 class="options-subheading">Producer template</h4>
+                      <div class="template-toolbar">
+                          <label class="topic-label" for="templateSelect">Template</label>
+                          <select id="templateSelect">
+                              <option value="">— select template —</option>
+                          </select>
+                          <button id="loadTemplateButton" class="btn-secondary">Load</button>
+                          <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
+                          <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
+                          <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
+                          <div class="token-picker-wrapper">
+                              <select id="tokenInsertSelect" title="Insert random token">
+                                  <option value="">Insert token…</option>
+                              </select>
+                          </div>
+                      </div>
+                  </div>
+                  <div class="options-section" id="optionsConsumerSection">
+                      <h4 class="options-subheading">Consumer</h4>
+                      <div class="consumer-controls options-consumer-controls">
+                          <div class="control-row">
+                              <span class="control-label">Start from</span>
+                              <div class="radio-group" id="startModeGroup">
+                                  <label><input type="radio" name="startMode" value="latest" checked> Now (latest)</label>
+                                  <label><input type="radio" name="startMode" value="earliest"> Beginning</label>
+                                  <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
+                              </div>
+                          </div>
+                          <div class="control-row offset-row" id="offsetRow" style="display:none;">
+                              <label class="control-inline">
+                                  <span>Partition</span>
+                                  <select id="partitionSelect">
+                                      <option value="">All partitions</option>
+                                  </select>
+                              </label>
+                              <label class="control-inline">
+                                  <span>Offset</span>
+                                  <input type="number" id="offsetInput" min="0" placeholder="0" />
+                              </label>
+                              <button id="refreshPartitionsButton" class="btn-secondary" title="Refresh partitions for this topic">↻</button>
+                          </div>
+                          <div class="control-row">
+                              <label class="control-inline">
+                                  <span>Max messages</span>
+                                  <input type="number" id="maxMessagesInput" min="1" placeholder="unlimited" />
+                              </label>
+                              <label class="control-inline group-inline">
+                                  <span>Consumer group</span>
+                                  <input type="text" id="consumerGroupInput" placeholder="kafka-safe-stream-group" />
+                              </label>
+                          </div>
+                      </div>
+                  </div>
+                  <div id="optionsResizer" class="options-resizer" role="separator" aria-orientation="vertical" aria-label="Resize options panel"></div>
               </div>
               <div id="producerContainer">
                   <div class="panel-heading">Producer Payload</div>
-                  <div class="template-toolbar">
-                      <label class="topic-label" for="templateSelect">Template</label>
-                      <select id="templateSelect">
-                          <option value="">— select template —</option>
-                      </select>
-                      <button id="loadTemplateButton" class="btn-secondary">Load</button>
-                      <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
-                      <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
-                      <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
-                      <div class="token-picker-wrapper">
-                          <select id="tokenInsertSelect" title="Insert random token">
-                              <option value="">Insert token…</option>
-                          </select>
-                      </div>
-                  </div>
                   <div id="payload"></div>
                   <div class="actions">
                       <button id="formatButton" disabled>Format</button>
@@ -147,37 +190,6 @@
               <div id="consumerContainer">
                   <div class="panel-heading">Consumed Messages</div>
                   <div class="consumer-controls">
-                      <div class="control-row">
-                          <span class="control-label">Start from</span>
-                          <div class="radio-group" id="startModeGroup">
-                              <label><input type="radio" name="startMode" value="latest" checked> Now (latest)</label>
-                              <label><input type="radio" name="startMode" value="earliest"> Beginning</label>
-                              <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
-                          </div>
-                      </div>
-                      <div class="control-row offset-row" id="offsetRow" style="display:none;">
-                          <label class="control-inline">
-                              <span>Partition</span>
-                              <select id="partitionSelect">
-                                  <option value="">All partitions</option>
-                              </select>
-                          </label>
-                          <label class="control-inline">
-                              <span>Offset</span>
-                              <input type="number" id="offsetInput" min="0" placeholder="0" />
-                          </label>
-                          <button id="refreshPartitionsButton" class="btn-secondary" title="Refresh partitions for this topic">↻</button>
-                      </div>
-                      <div class="control-row">
-                          <label class="control-inline">
-                              <span>Max messages</span>
-                              <input type="number" id="maxMessagesInput" min="1" placeholder="unlimited" />
-                          </label>
-                          <label class="control-inline group-inline">
-                              <span>Consumer group</span>
-                              <input type="text" id="consumerGroupInput" placeholder="kafka-safe-stream-group" />
-                          </label>
-                      </div>
                       <div class="control-row">
                           <label class="control-inline filter-inline">
                               <span>Filter</span>

@@ -444,9 +444,14 @@ body {
 }
 
 #topics {
-    flex: 0 0 280px;
+    flex: 0 0 var(--options-width, 340px);
     overflow-y: auto;
+    overflow-x: hidden;
     min-height: 0;
+    min-width: 260px;
+    max-width: 560px;
+    position: relative;
+    padding-right: 22px;
 }
 
 #topics h3 {
@@ -456,6 +461,53 @@ body {
     color: var(--color-text-subtle);
     text-transform: uppercase;
     letter-spacing: 0.8px;
+}
+
+.options-section {
+    padding: 12px 0;
+    border-top: 1px solid var(--color-border);
+}
+
+.options-section:first-of-type {
+    border-top: none;
+    padding-top: 0;
+}
+
+.options-section + .options-section {
+    margin-top: 0;
+}
+
+.options-subheading {
+    margin: 0 0 10px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--color-text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+
+.options-resizer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    background: transparent;
+    transition: background var(--transition);
+    z-index: 5;
+}
+
+.options-resizer:hover,
+.options-resizer.is-dragging {
+    background: var(--color-accent);
+    opacity: 0.5;
+}
+
+body.options-resizing,
+body.options-resizing * {
+    cursor: col-resize !important;
+    user-select: none !important;
 }
 
 .topic-label {
@@ -717,14 +769,14 @@ body {
     cursor: not-allowed;
 }
 
-/* ---------- Template toolbar (Producer) ---------- */
+/* ---------- Template toolbar (Producer, inside Options) ---------- */
 .template-toolbar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px;
-    margin-bottom: 10px;
+    padding: 10px;
+    margin-bottom: 0;
     border: 1px solid var(--color-border);
     border-radius: 8px;
     background: var(--color-bg-soft);
@@ -732,11 +784,12 @@ body {
 
 .template-toolbar .topic-label {
     margin: 0;
+    flex: 1 1 100%;
 }
 
 .template-toolbar select {
-    flex: 1 1 180px;
-    min-width: 160px;
+    flex: 1 1 100%;
+    min-width: 0;
     height: 32px;
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -747,12 +800,21 @@ body {
     font-size: 12px;
 }
 
+.template-toolbar button {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 0;
+}
+
 .token-picker-wrapper {
-    margin-left: auto;
+    flex: 1 1 100%;
+    margin-top: 4px;
+    border-top: 1px dashed var(--color-border);
+    padding-top: 8px;
 }
 
 #tokenInsertSelect {
-    min-width: 180px;
+    width: 100%;
+    min-width: 0;
     height: 32px;
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -780,6 +842,57 @@ body {
     flex-wrap: wrap;
     align-items: center;
     gap: 14px;
+}
+
+/* Scoped overrides when consumer controls live inside the Options sidebar */
+.options-consumer-controls {
+    margin-bottom: 0;
+}
+
+.options-consumer-controls .control-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.options-consumer-controls .control-label {
+    min-width: 0;
+}
+
+.options-consumer-controls .control-inline {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.options-consumer-controls .control-inline input,
+.options-consumer-controls .control-inline select {
+    width: 100%;
+    min-width: 0;
+}
+
+.options-consumer-controls .radio-group {
+    display: flex;
+    flex-direction: column;
+    border-radius: 10px;
+    padding: 6px;
+    gap: 2px;
+    align-items: stretch;
+}
+
+.options-consumer-controls .radio-group label {
+    width: 100%;
+    justify-content: flex-start;
+}
+
+.options-consumer-controls .offset-row {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.options-consumer-controls #refreshPartitionsButton {
+    align-self: flex-end;
 }
 
 .control-label {

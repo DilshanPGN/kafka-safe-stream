@@ -228,6 +228,15 @@ function applyActiveMethodLayout() {
     const optionsSection = document.getElementById('topics');
     if (optionsSection) optionsSection.style.display = hideTopicsChrome ? 'none' : '';
 
+    const producerOptionsSection = document.getElementById('optionsProducerSection');
+    const consumerOptionsSection = document.getElementById('optionsConsumerSection');
+    if (producerOptionsSection) {
+        producerOptionsSection.style.display = activeMethod === 'producer' ? '' : 'none';
+    }
+    if (consumerOptionsSection) {
+        consumerOptionsSection.style.display = activeMethod === 'consumer' ? '' : 'none';
+    }
+
     const envCard = document.getElementById('summaryCardActiveEnv');
     const groupCard = document.getElementById('summaryCardConsumerGroup');
     if (hideTopicsChrome) {
@@ -1531,6 +1540,80 @@ function closeAlert() {
     alertBox.style.display = 'none';
 }
 
+const OPTIONS_WIDTH_STORAGE_KEY = 'kss-options-width';
+const OPTIONS_WIDTH_MIN = 260;
+const OPTIONS_WIDTH_MAX = 560;
+const OPTIONS_WIDTH_DEFAULT = 340;
+
+function clampOptionsWidth(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return OPTIONS_WIDTH_DEFAULT;
+    return Math.min(OPTIONS_WIDTH_MAX, Math.max(OPTIONS_WIDTH_MIN, Math.round(num)));
+}
+
+function applyOptionsWidth(width) {
+    const clamped = clampOptionsWidth(width);
+    const optionsPanel = document.getElementById('topics');
+    if (optionsPanel) {
+        optionsPanel.style.setProperty('--options-width', `${clamped}px`);
+    }
+    return clamped;
+}
+
+function initializeOptionsResizer() {
+    const optionsPanel = document.getElementById('topics');
+    const resizer = document.getElementById('optionsResizer');
+    if (!optionsPanel || !resizer) return;
+
+    let stored = null;
+    try {
+        stored = window.localStorage.getItem(OPTIONS_WIDTH_STORAGE_KEY);
+    } catch (_) { /* ignore */ }
+    applyOptionsWidth(stored != null ? stored : OPTIONS_WIDTH_DEFAULT);
+
+    let dragStartX = 0;
+    let dragStartWidth = 0;
+    let dragging = false;
+
+    function onMouseMove(event) {
+        if (!dragging) return;
+        const delta = event.clientX - dragStartX;
+        applyOptionsWidth(dragStartWidth + delta);
+    }
+
+    function onMouseUp() {
+        if (!dragging) return;
+        dragging = false;
+        resizer.classList.remove('is-dragging');
+        document.body.classList.remove('options-resizing');
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        const finalWidth = clampOptionsWidth(optionsPanel.getBoundingClientRect().width);
+        try {
+            window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(finalWidth));
+        } catch (_) { /* ignore */ }
+    }
+
+    resizer.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        dragging = true;
+        dragStartX = event.clientX;
+        dragStartWidth = optionsPanel.getBoundingClientRect().width;
+        resizer.classList.add('is-dragging');
+        document.body.classList.add('options-resizing');
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+
+    resizer.addEventListener('dblclick', () => {
+        applyOptionsWidth(OPTIONS_WIDTH_DEFAULT);
+        try {
+            window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(OPTIONS_WIDTH_DEFAULT));
+        } catch (_) { /* ignore */ }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     document.querySelector('#custom-alert .custom-alert-close').addEventListener('click', closeAlert);
+    initializeOptionsResizer();
 });
