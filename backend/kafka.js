@@ -1,4 +1,4 @@
-const { Kafka, Partitioners } = require('kafkajs');
+const { Kafka, Partitioners, KafkaJSDeleteGroupsError } = require('kafkajs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -418,6 +418,15 @@ async function getConsumerLagOverview(kafka, topicName) {
     }
 }
 
+function topicOffsetsToLatestPartitions(topicOffsets) {
+    return (topicOffsets || [])
+        .map((row) => ({
+            partition: Number(row.partition),
+            offset: String(row.high !== undefined ? row.high : row.offset),
+        }))
+        .filter((row) => Number.isFinite(row.partition) && row.partition >= 0);
+}
+
 /**
  * Reset committed offsets for a consumer group on a topic to latest.
  * This clears lag relative to current log-end offsets.
@@ -432,12 +441,7 @@ async function resetConsumerGroupOffsetsToLatest(kafka, options) {
     try {
         await admin.connect();
         const topicOffsets = await admin.fetchTopicOffsets(topic);
-        const partitions = (topicOffsets || [])
-            .map((row) => ({
-                partition: Number(row.partition),
-                offset: String(row.high !== undefined ? row.high : row.offset),
-            }))
-            .filter((row) => Number.isFinite(row.partition) && row.partition >= 0);
+        const partitions = topicOffsetsToLatestPartitions(topicOffsets);
         if (!partitions.length) {
             throw new Error(`No partition offsets found for topic "${topic}"`);
         }
@@ -460,6 +464,10 @@ async function resetConsumerGroupOffsetsToLatest(kafka, options) {
     }
 }
 
+/**
+ * Bulk reset: one admin session and one fetchTopicOffsets for the topic, then setOffsets per group.
+ * (Per-group reset used to connect/disconnect and re-fetch offsets for every group, which is very slow.)
+ */
 async function resetConsumerGroupsOffsetsToLatest(kafka, options) {
     const topic = options && String(options.topic || '').trim();
     const groupIds = [...new Set((options && options.groupIds ? options.groupIds : [])
@@ -468,24 +476,36 @@ async function resetConsumerGroupsOffsetsToLatest(kafka, options) {
     if (!topic) throw new Error('topic is required');
     if (!groupIds.length) throw new Error('At least one groupId is required');
 
+    const admin = kafka.admin();
     const results = [];
-    for (const groupId of groupIds) {
-        try {
-            const one = await resetConsumerGroupOffsetsToLatest(kafka, { groupId, topic });
-            results.push({
-                ok: true,
-                groupId,
-                topic,
-                partitionCount: one.partitionCount,
-            });
-        } catch (err) {
-            results.push({
-                ok: false,
-                groupId,
-                topic,
-                error: err.message || String(err),
-            });
+    try {
+        await admin.connect();
+        const topicOffsets = await admin.fetchTopicOffsets(topic);
+        const partitions = topicOffsetsToLatestPartitions(topicOffsets);
+        if (!partitions.length) {
+            throw new Error(`No partition offsets found for topic "${topic}"`);
         }
+
+        for (const groupId of groupIds) {
+            try {
+                await admin.setOffsets({ groupId, topic, partitions });
+                results.push({
+                    ok: true,
+                    groupId,
+                    topic,
+                    partitionCount: partitions.length,
+                });
+            } catch (err) {
+                results.push({
+                    ok: false,
+                    groupId,
+                    topic,
+                    error: err.message || String(err),
+                });
+            }
+        }
+    } finally {
+        try { await admin.disconnect(); } catch (_) { /* ignore */ }
     }
 
     const successCount = results.filter((r) => r.ok).length;
@@ -497,6 +517,72 @@ async function resetConsumerGroupsOffsetsToLatest(kafka, options) {
         failureCount,
         results,
     };
+}
+
+/**
+ * Delete consumer groups via the broker (groups must be inactive / empty per Kafka rules).
+ */
+async function deleteConsumerGroups(kafka, options) {
+    const groupIds = [...new Set((options && options.groupIds ? options.groupIds : [])
+        .map((g) => String(g || '').trim())
+        .filter(Boolean))];
+    if (!groupIds.length) throw new Error('At least one groupId is required');
+
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+        try {
+            const brokerResults = await admin.deleteGroups(groupIds);
+            const byId = new Map();
+            for (const r of brokerResults || []) {
+                const gid = r && r.groupId;
+                if (!gid) continue;
+                const code = Number(r.errorCode);
+                if (code !== 0) {
+                    byId.set(gid, r.error || `Broker error code ${code}`);
+                } else {
+                    byId.set(gid, null);
+                }
+            }
+            const results = groupIds.map((groupId) => {
+                if (!byId.has(groupId)) {
+                    return { ok: false, groupId, error: 'No broker response for this group' };
+                }
+                const errMsg = byId.get(groupId);
+                if (errMsg) return { ok: false, groupId, error: errMsg };
+                return { ok: true, groupId };
+            });
+            const successCount = results.filter((r) => r.ok).length;
+            return {
+                total: results.length,
+                successCount,
+                failureCount: results.length - successCount,
+                results,
+            };
+        } catch (err) {
+            if (err instanceof KafkaJSDeleteGroupsError && Array.isArray(err.groups)) {
+                const failed = new Map(
+                    err.groups.map((g) => [g.groupId, g.error || `Broker error code ${g.errorCode}`])
+                );
+                const results = groupIds.map((groupId) => {
+                    if (failed.has(groupId)) {
+                        return { ok: false, groupId, error: failed.get(groupId) };
+                    }
+                    return { ok: true, groupId };
+                });
+                const successCount = results.filter((r) => r.ok).length;
+                return {
+                    total: results.length,
+                    successCount,
+                    failureCount: results.length - successCount,
+                    results,
+                };
+            }
+            throw err;
+        }
+    } finally {
+        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+    }
 }
 
 function appendOffsetResetAudit(event) {
@@ -628,6 +714,7 @@ module.exports = {
     getConsumerLagOverview,
     resetConsumerGroupOffsetsToLatest,
     resetConsumerGroupsOffsetsToLatest,
+    deleteConsumerGroups,
     appendOffsetResetAudit,
     getClusterMetadata,
 };
