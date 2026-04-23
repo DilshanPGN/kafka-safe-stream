@@ -221,6 +221,52 @@ body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
     display: flex;
 }
 
+.consumer-consume-summary {
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-soft);
+    color: var(--color-text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.45;
+}
+
+.consumer-consume-summary[hidden] {
+    display: none !important;
+}
+
+.consumer-options-consume-summary {
+    margin: 6px 0 8px;
+}
+
+/* While consuming: emphasize checked Start-from row; radios stay disabled */
+#optionsConsumerSection.is-consuming #startModeGroup input[type="radio"]:disabled {
+    opacity: 1;
+    accent-color: var(--color-accent);
+}
+
+#optionsConsumerSection.is-consuming #startModeGroup label {
+    border: 1px solid transparent;
+    border-radius: 8px;
+    transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+
+#optionsConsumerSection.is-consuming #startModeGroup label:has(input[type="radio"]:checked) {
+    color: var(--color-text);
+    opacity: 1;
+    font-weight: 700;
+    border-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 18%, var(--color-bg-soft));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+#optionsConsumerSection.is-consuming #startModeGroup label:has(input[type="radio"]:not(:checked)) {
+    color: var(--color-text-subtle);
+    opacity: 1;
+}
+
 .consumer-fetch-spinner {
     flex: 0 0 16px;
     width: 16px;

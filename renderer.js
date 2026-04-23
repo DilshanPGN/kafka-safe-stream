@@ -724,56 +724,37 @@ function formatPayloadForViewer(raw, formatId) {
     }
 }
 
+const PAYLOAD_VIEWER_STORAGE_KEY = 'kssPayloadViewer';
+
 function openConsumerMessagePayloadWindow(msg) {
     if (!msg) return;
     const raw = msg.value != null ? String(msg.value) : '';
-    // Do not pass `noopener` here: with noopener, window.open() returns null (by spec), so we
-    // could not call document.write. Real popup blockers still return null with no features fix.
-    const w = window.open('', '_blank', 'width=920,height=720,scrollbars=yes');
-    if (!w) {
-        showAlert('View payload', 'Could not open a new window (popup blocker or OS restriction).');
-        return;
-    }
     const theme = document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
     const fmtId = PAYLOAD_FORMATS[consumerFormat] ? consumerFormat : DEFAULT_FORMAT;
-    const fmtLabel = (PAYLOAD_FORMATS[fmtId] || PAYLOAD_FORMATS[DEFAULT_FORMAT]).label;
     const display = formatPayloadForViewer(raw, fmtId);
-    const escaped = escapeHtml(display);
-    let themeHref = '';
     try {
-        themeHref = new URL('theme-variables.css', window.location.href).href;
-    } catch (_) {
-        themeHref = 'theme-variables.css';
+        sessionStorage.setItem(PAYLOAD_VIEWER_STORAGE_KEY, JSON.stringify({
+            text: display,
+            theme,
+            formatId: fmtId,
+        }));
+    } catch (err) {
+        showAlert('View payload', 'Could not store payload for the viewer (too large or storage unavailable).');
+        return;
     }
-    const title = `Message — ${fmtLabel}`;
-    w.document.write(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<title>${escapeHtml(title)}</title>
-<link rel="stylesheet" href="${escapeHtml(themeHref)}">
-<style>
-  html, body { margin: 0; min-height: 100%; }
-  body {
-    box-sizing: border-box;
-    padding: 16px;
-    background: var(--color-bg);
-    color: var(--color-text);
-    font-family: "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
-    font-size: 13px;
-    line-height: 1.55;
-    -webkit-font-smoothing: antialiased;
-  }
-  pre {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    padding: 16px;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    background: var(--color-bg-soft);
-    color: var(--color-text);
-    box-shadow: var(--shadow-sm);
-  }
-</style></head><body data-theme="${theme}"><pre>${escaped}</pre></body></html>`);
-    w.document.close();
+    let url;
+    try {
+        url = new URL('payload-viewer.html', window.location.href).href;
+    } catch (_) {
+        url = 'payload-viewer.html';
+    }
+    const w = window.open(url, '_blank', 'width=920,height=720,scrollbars=yes');
+    if (!w) {
+        try {
+            sessionStorage.removeItem(PAYLOAD_VIEWER_STORAGE_KEY);
+        } catch (_) { /* ignore */ }
+        showAlert('View payload', 'Could not open a new window (popup blocker or OS restriction).');
+    }
 }
 
 function wireConsumerTablePayloadViewer() {
@@ -2000,6 +1981,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     updateSummaryCards();
 
                     const kafka = await getKafkaClient();
+                    setConsumerConsumeSummary(opts);
                     setConsumeRunningUI(true);
                     if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
                         showConsumerSeekingStatus({
@@ -2098,9 +2080,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 });
 
+function formatConsumeSummaryText(opts) {
+    if (!opts) return '';
+    let startLine;
+    const sm = opts.startMode || 'latest';
+    if (sm === 'earliest') {
+        startLine = 'Beginning';
+    } else if (sm === 'offset') {
+        const partLabel = opts.partition == null ? 'All partitions' : `Partition ${opts.partition}`;
+        const off = opts.offset != null && String(opts.offset) !== ''
+            ? String(opts.offset)
+            : '—';
+        startLine = `Specific offset (${partLabel}, offset ${off})`;
+    } else {
+        startLine = 'Now (latest)';
+    }
+    const parts = [`Start from: ${startLine}`];
+    if (opts.maxMessages != null && Number.isFinite(Number(opts.maxMessages))) {
+        parts.push(`Max messages: ${opts.maxMessages}`);
+    }
+    return parts.join(' · ');
+}
+
+function setConsumerConsumeSummary(opts) {
+    const text = opts ? formatConsumeSummaryText(opts) : '';
+    const hidden = !opts;
+    ['consumerConsumeSummary', 'consumerOptionsConsumeSummary'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.hidden = hidden;
+    });
+}
+
 function setConsumeRunningUI(running) {
     const consumeBtn = document.getElementById('consumeButton');
     if (!consumeBtn) return;
+    const optionsSection = document.getElementById('optionsConsumerSection');
+    if (optionsSection) {
+        optionsSection.classList.toggle('is-consuming', !!running);
+    }
+    if (!running) {
+        setConsumerConsumeSummary(null);
+    }
     consumeBtn.innerHTML = running ? 'Stop Consuming' : 'Start Consuming';
     consumeBtn.style.backgroundColor = running ? '#dc3545' : '';
     consumeBtn.disabled = !running && (consumerTopic === '');
