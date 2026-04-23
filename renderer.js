@@ -64,7 +64,7 @@ const ajv = new Ajv();
 const DEFAULT_GROUP = 'kafka-safe-stream-group';
 const LINE_SEPARATOR = '\n\n◀▶\n\n';
 const THEME_STORAGE_KEY = 'kss-theme';
-const READONLY_STORAGE_KEY = 'kss-readonly';
+const APP_MODE_STORAGE_KEY = 'kss-app-mode';
 const PREFS_PATH = path.join(os.homedir(), '.kss', 'preferences.json');
 
 const PAYLOAD_FORMATS = {
@@ -87,7 +87,6 @@ let validPayload = false;
 let editor = null;
 let consumer = null;
 let consumerBlinkOn = false;
-let readOnlyMode = true;
 let consumerGroup = DEFAULT_GROUP;
 let topicsCache = [];
 let consumedMessages = [];
@@ -102,6 +101,8 @@ let lagTopic = '';
 let consumerBlurIdleTimerId = null;
 let consumerIdleCountdownIntervalId = null;
 let consumerIdleModalActive = false;
+let appMode = 'advanced';
+let consumerSeekHintTimerId = null;
 
 function loadPreferences() {
     try {
@@ -194,47 +195,126 @@ function initializeThemeToggle() {
     }
 }
 
-function loadReadOnlyState() {
+function loadAppMode() {
     try {
-        const stored = localStorage.getItem(READONLY_STORAGE_KEY);
-        if (stored === null) return true;
-        return stored === 'true';
+        const stored = window.localStorage.getItem(APP_MODE_STORAGE_KEY);
+        appMode = stored === 'basic' ? 'basic' : 'advanced';
     } catch (_) {
-        return true;
+        appMode = 'advanced';
     }
 }
 
-function applyReadOnlyState() {
-    const btn = document.getElementById('readonlyToggle');
-    if (btn) {
-        btn.classList.toggle('active', readOnlyMode);
-        btn.setAttribute('aria-pressed', readOnlyMode ? 'true' : 'false');
-        btn.title = readOnlyMode
-            ? 'Read-only: consumer group locked. Click to allow editing.'
-            : 'Editable: click to lock consumer group (read-only).';
-        btn.setAttribute('aria-label', readOnlyMode ? 'Read-only mode' : 'Editable mode');
+function applyAppModeToBody() {
+    document.body.setAttribute('data-app-mode', appMode);
+    const basicBtn = document.getElementById('appModeBasic');
+    const advBtn = document.getElementById('appModeAdvanced');
+    if (basicBtn) {
+        basicBtn.classList.toggle('active', appMode === 'basic');
+        basicBtn.setAttribute('aria-pressed', appMode === 'basic' ? 'true' : 'false');
     }
+    if (advBtn) {
+        advBtn.classList.toggle('active', appMode === 'advanced');
+        advBtn.setAttribute('aria-pressed', appMode === 'advanced' ? 'true' : 'false');
+    }
+    applyConsumerGroupFieldState();
+}
+
+function applyConsumerGroupFieldState() {
     const groupInput = document.getElementById('consumerGroupInput');
-    if (groupInput) {
-        groupInput.disabled = readOnlyMode || consumeStarted;
-        groupInput.title = readOnlyMode
-            ? 'Click the lock in the toolbar to allow editing the consumer group'
-            : '';
+    if (!groupInput) return;
+    const basic = appMode === 'basic';
+    groupInput.disabled = basic || consumeStarted;
+    if (basic) {
+        groupInput.title = 'Switch to Advanced mode to edit the consumer group.';
+    } else if (consumeStarted) {
+        groupInput.title = '';
+    } else {
+        groupInput.title = '';
     }
 }
 
-function initializeReadOnlyToggle() {
-    readOnlyMode = loadReadOnlyState();
-    applyReadOnlyState();
-    const btn = document.getElementById('readonlyToggle');
-    if (btn) {
-        btn.addEventListener('click', () => {
-            readOnlyMode = !readOnlyMode;
-            try { localStorage.setItem(READONLY_STORAGE_KEY, String(readOnlyMode)); }
-            catch (_) { /* ignore */ }
-            applyReadOnlyState();
-        });
+function isMethodVisibleInAppMode(m) {
+    if (appMode === 'advanced') return true;
+    return m.id === 'producer' || m.id === 'consumer' || m.id === 'consumerLag';
+}
+
+function rebuildMethodTabs() {
+    const methodTabContainer = document.getElementById('tabs');
+    if (!methodTabContainer) return;
+    const visible = Object.values(method).filter(isMethodVisibleInAppMode);
+    if (!visible.some((vm) => vm.id === activeMethod)) {
+        activeMethod = 'producer';
     }
+    methodTabContainer.innerHTML = '';
+    visible.forEach((m) => buildMethodTab(methodTabContainer, m));
+    const activeTab = document.getElementById(activeMethod);
+    if (activeTab) {
+        onMethodTabClick(activeTab);
+    } else if (visible.length) {
+        onMethodTabClick(document.getElementById(visible[0].id));
+    }
+}
+
+function setAppMode(next) {
+    const nextMode = next === 'basic' ? 'basic' : 'advanced';
+    if (nextMode === appMode) {
+        applyAppModeToBody();
+        return;
+    }
+    appMode = nextMode;
+    try {
+        window.localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
+    } catch (_) { /* ignore */ }
+    if (appMode === 'basic' && !['producer', 'consumer', 'consumerLag'].includes(activeMethod)) {
+        activeMethod = 'producer';
+    }
+    applyAppModeToBody();
+    rebuildMethodTabs();
+}
+
+function initializeAppModeToggle() {
+    const basicBtn = document.getElementById('appModeBasic');
+    const advBtn = document.getElementById('appModeAdvanced');
+    if (basicBtn) {
+        basicBtn.addEventListener('click', () => setAppMode('basic'));
+    }
+    if (advBtn) {
+        advBtn.addEventListener('click', () => setAppMode('advanced'));
+    }
+}
+
+function hideConsumerSeekingStatus() {
+    const el = document.getElementById('consumerFetchStatus');
+    if (el) {
+        el.classList.remove('is-visible');
+        el.innerHTML = '';
+    }
+    if (consumerSeekHintTimerId) {
+        clearTimeout(consumerSeekHintTimerId);
+        consumerSeekHintTimerId = null;
+    }
+}
+
+function showConsumerSeekingStatus(opts) {
+    const el = document.getElementById('consumerFetchStatus');
+    if (!el) return;
+    const partLabel = opts.partition != null && opts.partition !== ''
+        ? `partition ${opts.partition}`
+        : 'all partitions';
+    const off = opts.offset != null && String(opts.offset) !== '' ? String(opts.offset) : '(unspecified)';
+    el.innerHTML = `<span class="consumer-fetch-spinner" aria-hidden="true"></span><span class="consumer-fetch-text">Seeking to offset ${off} on ${partLabel} — waiting for messages…</span>`;
+    el.classList.add('is-visible');
+    if (consumerSeekHintTimerId) {
+        clearTimeout(consumerSeekHintTimerId);
+        consumerSeekHintTimerId = null;
+    }
+    consumerSeekHintTimerId = setTimeout(() => {
+        const text = el.querySelector('.consumer-fetch-text');
+        if (text && el.classList.contains('is-visible')) {
+            text.textContent = 'Still waiting — the offset may be past the end of the log, or there may be no messages yet.';
+        }
+        consumerSeekHintTimerId = null;
+    }, 10000);
 }
 
 function renderConsumerTabBlink(show) {
@@ -553,6 +633,7 @@ function applyFilter() {
 }
 
 function pushConsumedMessage(msg) {
+    hideConsumerSeekingStatus();
     consumedMessages.push(msg);
     applyFilter();
 }
@@ -735,6 +816,7 @@ function resetConsumerIdleWatchdog() {
 }
 
 function resetConsumeUIState() {
+    hideConsumerSeekingStatus();
     if (window.refreshIntervalId) {
         clearInterval(window.refreshIntervalId);
         window.refreshIntervalId = null;
@@ -742,7 +824,7 @@ function resetConsumeUIState() {
     renderConsumerTabBlink(false);
     setConsumeRunningUI(false);
     consumeStarted = false;
-    applyReadOnlyState();
+    applyConsumerGroupFieldState();
 }
 
 async function stopConsumingAndResetUI() {
@@ -879,12 +961,18 @@ function renderTopicsTable() {
                 <button class="btn-secondary" data-action="lag" title="Open Consumer lag for this topic">Lag</button>
             </td>
         `;
-        tr.querySelector('[data-action="produce"]').addEventListener('click', () => {
-            useTopic(t.name, 'producer');
-        });
-        tr.querySelector('[data-action="consume"]').addEventListener('click', () => {
-            useTopic(t.name, 'consumer');
-        });
+        const produceBtn = tr.querySelector('[data-action="produce"]');
+        if (produceBtn) {
+            produceBtn.addEventListener('click', () => {
+                useTopic(t.name, 'producer');
+            });
+        }
+        const consumeBtn = tr.querySelector('[data-action="consume"]');
+        if (consumeBtn) {
+            consumeBtn.addEventListener('click', () => {
+                useTopic(t.name, 'consumer');
+            });
+        }
         tr.querySelector('[data-action="lag"]').addEventListener('click', () => {
             navigateToConsumerLag(t.name);
         });
@@ -1010,7 +1098,9 @@ async function navigateToConsumerLag(topicName) {
     lagTopic = topicName;
     populateTopicSelect();
     clearLagOverviewUI();
-    onMethodTabClick(document.getElementById('consumerLag'));
+    const lagTab = document.getElementById('consumerLag');
+    if (!lagTab) return;
+    onMethodTabClick(lagTab);
     await loadConsumerLagOverview();
 }
 
@@ -1154,7 +1244,9 @@ async function useTopic(topicName, methodId) {
 
 document.addEventListener('DOMContentLoaded', async () => {
     initializeThemeToggle();
-    initializeReadOnlyToggle();
+    loadAppMode();
+    applyAppModeToBody();
+    initializeAppModeToggle();
     showLoading();
     loadConfig().then(() => {
         activeEnv = Object.keys(envConfig)[0];
@@ -1191,13 +1283,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             onEnvChange(event.target.value);
         });
 
-        const methodTabContainer = document.getElementById('tabs');
-        Object.values(method).forEach((m) => buildMethodTab(methodTabContainer, m));
-
-        Object.values(method).forEach((m) => {
-            document.getElementById(m.containerId).style.display =
-                m.id === activeMethod ? 'flex' : 'none';
-        });
+        rebuildMethodTabs();
 
         onEnvChange(activeEnv);
         updateSummaryCards();
@@ -1241,6 +1327,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                     const kafka = await getKafkaClient();
                     setConsumeRunningUI(true);
+                    if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
+                        showConsumerSeekingStatus({
+                            partition: opts.partition,
+                            offset: opts.offset,
+                        });
+                    }
                     consumeMessages(kafka, opts, (msg) => {
                         pushConsumedMessage(msg);
                     }, () => {
@@ -1260,7 +1352,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         consumerBlinkOn = !consumerBlinkOn;
                         renderConsumerTabBlink(consumerBlinkOn);
                     }, 1000);
-                    applyReadOnlyState();
+                    applyConsumerGroupFieldState();
                     if (!document.hasFocus()) {
                         scheduleConsumerBlurIdleTimer();
                     }
@@ -1348,11 +1440,21 @@ function setConsumeRunningUI(running) {
 }
 
 function readConsumerOptions() {
+    const maxMessagesRaw = document.getElementById('maxMessagesInput').value;
+    const groupRaw = document.getElementById('consumerGroupInput').value.trim();
+    if (appMode === 'basic') {
+        return {
+            topic: consumerTopic,
+            groupId: groupRaw || DEFAULT_GROUP,
+            startMode: 'latest',
+            partition: null,
+            offset: null,
+            maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
+        };
+    }
     const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'latest';
     const partitionRaw = document.getElementById('partitionSelect').value;
     const offsetRaw = document.getElementById('offsetInput').value;
-    const maxMessagesRaw = document.getElementById('maxMessagesInput').value;
-    const groupRaw = document.getElementById('consumerGroupInput').value.trim();
     return {
         topic: consumerTopic,
         groupId: groupRaw || DEFAULT_GROUP,
@@ -1523,12 +1625,12 @@ async function reapplyConfig(newConfig) {
         const nextEnv = envIds.includes(activeEnv) ? activeEnv : envIds[0];
         envSelect.value = nextEnv;
         onEnvChange(nextEnv);
-        if (activeMethod === 'topicsBrowser') {
+        if (activeMethod === 'topicsBrowser' && document.getElementById('topicsBrowser')) {
             loadTopicsBrowser(true);
         }
     } finally {
         hideLoading();
-        applyReadOnlyState();
+        applyConsumerGroupFieldState();
     }
 }
 
@@ -1568,7 +1670,7 @@ const onEnvChange = (envId) => {
 
     reloadProduceButton();
     updateSummaryCards();
-    applyReadOnlyState();
+    applyConsumerGroupFieldState();
 
     hideLoading();
 };
@@ -1596,7 +1698,7 @@ const onTopicChange = (topic, methodId) => {
     }
     reloadProduceButton();
     updateSummaryCards();
-    applyReadOnlyState();
+    applyConsumerGroupFieldState();
     hideLoading();
 };
 

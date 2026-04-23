@@ -240,24 +240,61 @@ body {
     opacity: 1;
 }
 
-#readonlyToggle {
-    position: relative;
+.app-mode-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 999px;
+    background: var(--color-bg-soft);
+    border: 1px solid var(--color-border);
 }
 
-#readonlyToggle .readonly-toggle__icon {
-    display: block;
+.app-mode-pill {
+    height: 28px;
+    min-height: 28px;
+    padding: 0 12px;
+    font-size: 11px;
+    letter-spacing: 0.4px;
 }
 
-#readonlyToggle .readonly-toggle__icon--edit {
+body[data-app-mode="basic"] .options-consumer-controls .options-row--basic-hide {
+    display: none !important;
+}
+
+.consumer-fetch-status {
     display: none;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-soft);
+    color: var(--color-text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
 }
 
-#readonlyToggle:not(.active) .readonly-toggle__icon--lock {
-    display: none;
+.consumer-fetch-status.is-visible {
+    display: flex;
 }
 
-#readonlyToggle:not(.active) .readonly-toggle__icon--edit {
-    display: block;
+.consumer-fetch-spinner {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    margin-top: 2px;
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: rotation 0.9s linear infinite;
+}
+
+.consumer-fetch-text {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .env-switcher {

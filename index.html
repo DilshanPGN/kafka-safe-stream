@@ -83,15 +83,10 @@
                           <span class="theme-slider" aria-hidden="true"></span>
                       </span>
                   </label>
-                  <button id="readonlyToggle" class="toolbar-pill toolbar-pill--icon active" type="button" aria-pressed="true" title="Read-only: consumer group locked. Click to allow editing." aria-label="Read-only mode">
-                      <svg class="readonly-toggle__icon readonly-toggle__icon--lock" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" stroke="currentColor" stroke-width="2"/>
-                          <path d="M7 11V7a5 5 0 0 1 10 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                      </svg>
-                      <svg class="readonly-toggle__icon readonly-toggle__icon--edit" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                          <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                      </svg>
-                  </button>
+                  <div class="app-mode-group" role="group" aria-label="App mode">
+                      <button type="button" id="appModeBasic" class="toolbar-pill app-mode-pill" aria-pressed="false">Basic</button>
+                      <button type="button" id="appModeAdvanced" class="toolbar-pill app-mode-pill active" aria-pressed="true">Advanced</button>
+                  </div>
                   <button id="setupButton" class="toolbar-pill toolbar-pill--icon" type="button" title="Options" aria-label="Options">
                       <svg class="toolbar-cog" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                           <path stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
@@ -167,7 +162,7 @@
                                   </select>
                               </label>
                           </div>
-                          <div class="control-row">
+                          <div class="control-row options-row--basic-hide">
                               <span class="control-label">Start from</span>
                               <div class="radio-group" id="startModeGroup">
                                   <label><input type="radio" name="startMode" value="latest" checked> Now (latest)</label>
@@ -175,7 +170,7 @@
                                   <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
                               </div>
                           </div>
-                          <div class="control-row offset-row" id="offsetRow" style="display:none;">
+                          <div class="control-row offset-row options-row--basic-hide" id="offsetRow" style="display:none;">
                               <label class="control-inline">
                                   <span>Partition</span>
                                   <select id="partitionSelect">
@@ -193,6 +188,8 @@
                                   <span>Max messages</span>
                                   <input type="number" id="maxMessagesInput" min="1" placeholder="unlimited" />
                               </label>
+                          </div>
+                          <div class="control-row options-row--basic-hide">
                               <label class="control-inline group-inline">
                                   <span>Consumer group</span>
                                   <input type="text" id="consumerGroupInput" placeholder="kafka-safe-stream-group" />
@@ -224,6 +221,7 @@
                           <span id="messageCount" class="message-count">0 / 0</span>
                       </div>
                   </div>
+                  <div id="consumerFetchStatus" class="consumer-fetch-status" role="status" aria-live="polite"></div>
                   <div id="consumedMessages"></div>
                   <div class="actions">
                       <button id="clearMessages">Clear</button>
