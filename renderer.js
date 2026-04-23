@@ -7,6 +7,10 @@ const {
     getTopicsAndPartitions,
     getTopicOffsets,
     getConsumerLagOverview,
+    resetConsumerGroupOffsetsToLatest,
+    resetConsumerGroupsOffsetsToLatest,
+    deleteConsumerGroups,
+    appendOffsetResetAudit,
     getClusterMetadata,
 } = require('./backend/kafka');
 const templatesApi = require('./backend/templates');
@@ -16,31 +20,44 @@ const fs = require('fs');
 const os = require('os');
 const Ajv = require('ajv');
 
+const TAB_ICONS = {
+    producer: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M22 2 11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 2 15 22l-4-9-9-4 20-7Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    consumer: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 14v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 15V3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    topicsBrowser: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4" cy="6" r="1" fill="currentColor"/><circle cx="4" cy="12" r="1" fill="currentColor"/><circle cx="4" cy="18" r="1" fill="currentColor"/></svg>',
+    consumerLag: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 12a9 9 0 1 1 18 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 12 16 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>',
+    clusterInfo: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="3" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="3" y="15" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="2"/><circle cx="7" cy="6" r="1" fill="currentColor"/><circle cx="7" cy="18" r="1" fill="currentColor"/></svg>',
+};
+
 const method = {
     producer: {
         id: 'producer',
-        label: 'Produce message',
+        label: 'Produce',
         containerId: 'producerContainer',
+        icon: TAB_ICONS.producer,
     },
     consumer: {
         id: 'consumer',
-        label: 'Consume message',
+        label: 'Consume',
         containerId: 'consumerContainer',
+        icon: TAB_ICONS.consumer,
     },
     topicsBrowser: {
         id: 'topicsBrowser',
-        label: 'Topics & Partitions',
+        label: 'Topics',
         containerId: 'topicsBrowserContainer',
+        icon: TAB_ICONS.topicsBrowser,
     },
     consumerLag: {
         id: 'consumerLag',
         label: 'Consumer lag',
         containerId: 'consumerLagContainer',
+        icon: TAB_ICONS.consumerLag,
     },
     clusterInfo: {
         id: 'clusterInfo',
-        label: 'Cluster Metadata',
+        label: 'Cluster',
         containerId: 'clusterInfoContainer',
+        icon: TAB_ICONS.clusterInfo,
     },
 };
 
@@ -51,8 +68,17 @@ const ajv = new Ajv();
 const DEFAULT_GROUP = 'kafka-safe-stream-group';
 const LINE_SEPARATOR = '\n\n◀▶\n\n';
 const THEME_STORAGE_KEY = 'kss-theme';
-const READONLY_STORAGE_KEY = 'kss-readonly';
+const APP_MODE_STORAGE_KEY = 'kss-app-mode';
 const PREFS_PATH = path.join(os.homedir(), '.kss', 'preferences.json');
+
+const PAYLOAD_FORMATS = {
+    json: { id: 'json', label: 'JSON', cmMode: { name: 'javascript', json: true } },
+    xml: { id: 'xml', label: 'XML', cmMode: 'xml' },
+    text: { id: 'text', label: 'Plain text', cmMode: null },
+};
+const DEFAULT_FORMAT = 'json';
+const PRODUCER_FORMAT_STORAGE_KEY = 'kss-producer-format';
+const CONSUMER_FORMAT_STORAGE_KEY = 'kss-consumer-format';
 
 let activeEnv = null;
 let activeMethod = 'producer';
@@ -65,19 +91,29 @@ let validPayload = false;
 let editor = null;
 let consumer = null;
 let consumerBlinkOn = false;
-let readOnlyMode = true;
 let consumerGroup = DEFAULT_GROUP;
 let topicsCache = [];
 let consumedMessages = [];
 let selectedTemplateId = '';
+let producerFormat = DEFAULT_FORMAT;
+let consumerFormat = DEFAULT_FORMAT;
 let kafkaClientCache = { env: null, client: null };
 let rendererInitialized = false;
 let pendingConfigUpdate = null;
 window.refreshIntervalId = null;
 let lagTopic = '';
+let lagOverviewData = null;
+let lagResetInFlight = false;
+/** When true, consumed messages render as a table instead of CodeMirror. */
+let consumerTableView = false;
+/** Last rows rendered in the consumer table (for “View payload” window). */
+let lastConsumerTableFilteredSnapshot = [];
+let consumerTablePayloadClickBound = false;
 let consumerBlurIdleTimerId = null;
 let consumerIdleCountdownIntervalId = null;
 let consumerIdleModalActive = false;
+let appMode = 'advanced';
+let consumerSeekHintTimerId = null;
 
 function loadPreferences() {
     try {
@@ -100,7 +136,13 @@ function savePreferences(prefs) {
 }
 
 /**
- * Consumer background-idle prompt. Stored in preferences.json (~/.kss/preferences.json).
+ * preferences.json (~/.kss/preferences.json) also stores:
+ * - lastActiveEnvId — environment restored on startup
+ * - lastActiveMethodByEnv — map of env id → last main tab (producer, consumer, …)
+ * - lastActiveMethod — global fallback for the active tab
+ * - consumerTableView — show consumer messages as metadata table vs stream editor
+ *
+ * Consumer background-idle:
  * consumerIdle.blurUnfocusedMinutes — unfocused time before "still there?" (default 60 = 1 hour).
  * consumerIdle.promptResponseMinutes — countdown before auto-stop if no confirmation (default 3).
  */
@@ -128,6 +170,42 @@ function setGroupForTopic(envId, topic, group) {
     const prefs = loadPreferences();
     prefs.groupsByTopic = prefs.groupsByTopic || {};
     prefs.groupsByTopic[`${envId}::${topic}`] = group;
+    savePreferences(prefs);
+}
+
+function readLastMethodForEnv(envId) {
+    const prefs = loadPreferences();
+    const byEnv = prefs.lastActiveMethodByEnv;
+    let cand = (byEnv && typeof byEnv === 'object' && byEnv[envId]) || prefs.lastActiveMethod || 'producer';
+    cand = String(cand);
+    if (!method[cand]) cand = 'producer';
+    return cand;
+}
+
+function resolveMethodForEnv(envId) {
+    let m = readLastMethodForEnv(envId);
+    if (!isMethodVisibleInAppMode(method[m])) {
+        const visible = Object.values(method).filter(isMethodVisibleInAppMode);
+        m = visible[0] ? visible[0].id : 'producer';
+    }
+    return m;
+}
+
+function persistLastMethodForEnv(envId, methodId) {
+    if (!envId || !methodId) return;
+    const prefs = loadPreferences();
+    prefs.lastActiveMethodByEnv = prefs.lastActiveMethodByEnv && typeof prefs.lastActiveMethodByEnv === 'object'
+        ? prefs.lastActiveMethodByEnv
+        : {};
+    prefs.lastActiveMethodByEnv[envId] = methodId;
+    prefs.lastActiveMethod = methodId;
+    savePreferences(prefs);
+}
+
+function persistLastEnv(envId) {
+    if (!envId) return;
+    const prefs = loadPreferences();
+    prefs.lastActiveEnvId = envId;
     savePreferences(prefs);
 }
 
@@ -170,47 +248,126 @@ function initializeThemeToggle() {
     }
 }
 
-function loadReadOnlyState() {
+function loadAppMode() {
     try {
-        const stored = localStorage.getItem(READONLY_STORAGE_KEY);
-        if (stored === null) return true;
-        return stored === 'true';
+        const stored = window.localStorage.getItem(APP_MODE_STORAGE_KEY);
+        appMode = stored === 'basic' ? 'basic' : 'advanced';
     } catch (_) {
-        return true;
+        appMode = 'advanced';
     }
 }
 
-function applyReadOnlyState() {
-    const btn = document.getElementById('readonlyToggle');
-    if (btn) {
-        btn.classList.toggle('active', readOnlyMode);
-        btn.setAttribute('aria-pressed', readOnlyMode ? 'true' : 'false');
-        btn.title = readOnlyMode
-            ? 'Read-only: consumer group locked. Click to allow editing.'
-            : 'Editable: click to lock consumer group (read-only).';
-        btn.setAttribute('aria-label', readOnlyMode ? 'Read-only mode' : 'Editable mode');
+function applyAppModeToBody() {
+    document.body.setAttribute('data-app-mode', appMode);
+    const basicBtn = document.getElementById('appModeBasic');
+    const advBtn = document.getElementById('appModeAdvanced');
+    if (basicBtn) {
+        basicBtn.classList.toggle('active', appMode === 'basic');
+        basicBtn.setAttribute('aria-pressed', appMode === 'basic' ? 'true' : 'false');
     }
+    if (advBtn) {
+        advBtn.classList.toggle('active', appMode === 'advanced');
+        advBtn.setAttribute('aria-pressed', appMode === 'advanced' ? 'true' : 'false');
+    }
+    applyConsumerGroupFieldState();
+}
+
+function applyConsumerGroupFieldState() {
     const groupInput = document.getElementById('consumerGroupInput');
-    if (groupInput) {
-        groupInput.disabled = readOnlyMode || consumeStarted;
-        groupInput.title = readOnlyMode
-            ? 'Click the lock in the toolbar to allow editing the consumer group'
-            : '';
+    if (!groupInput) return;
+    const basic = appMode === 'basic';
+    groupInput.disabled = basic || consumeStarted;
+    if (basic) {
+        groupInput.title = 'Switch to Advanced mode to edit the consumer group.';
+    } else if (consumeStarted) {
+        groupInput.title = '';
+    } else {
+        groupInput.title = '';
     }
 }
 
-function initializeReadOnlyToggle() {
-    readOnlyMode = loadReadOnlyState();
-    applyReadOnlyState();
-    const btn = document.getElementById('readonlyToggle');
-    if (btn) {
-        btn.addEventListener('click', () => {
-            readOnlyMode = !readOnlyMode;
-            try { localStorage.setItem(READONLY_STORAGE_KEY, String(readOnlyMode)); }
-            catch (_) { /* ignore */ }
-            applyReadOnlyState();
-        });
+function isMethodVisibleInAppMode(m) {
+    if (appMode === 'advanced') return true;
+    return m.id === 'producer' || m.id === 'consumer' || m.id === 'consumerLag';
+}
+
+function rebuildMethodTabs() {
+    const methodTabContainer = document.getElementById('tabs');
+    if (!methodTabContainer) return;
+    const visible = Object.values(method).filter(isMethodVisibleInAppMode);
+    if (!visible.some((vm) => vm.id === activeMethod)) {
+        activeMethod = 'producer';
     }
+    methodTabContainer.innerHTML = '';
+    visible.forEach((m) => buildMethodTab(methodTabContainer, m));
+    const activeTab = document.getElementById(activeMethod);
+    if (activeTab) {
+        onMethodTabClick(activeTab);
+    } else if (visible.length) {
+        onMethodTabClick(document.getElementById(visible[0].id));
+    }
+}
+
+function setAppMode(next) {
+    const nextMode = next === 'basic' ? 'basic' : 'advanced';
+    if (nextMode === appMode) {
+        applyAppModeToBody();
+        return;
+    }
+    appMode = nextMode;
+    try {
+        window.localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
+    } catch (_) { /* ignore */ }
+    if (appMode === 'basic' && !['producer', 'consumer', 'consumerLag'].includes(activeMethod)) {
+        activeMethod = 'producer';
+    }
+    applyAppModeToBody();
+    rebuildMethodTabs();
+}
+
+function initializeAppModeToggle() {
+    const basicBtn = document.getElementById('appModeBasic');
+    const advBtn = document.getElementById('appModeAdvanced');
+    if (basicBtn) {
+        basicBtn.addEventListener('click', () => setAppMode('basic'));
+    }
+    if (advBtn) {
+        advBtn.addEventListener('click', () => setAppMode('advanced'));
+    }
+}
+
+function hideConsumerSeekingStatus() {
+    const el = document.getElementById('consumerFetchStatus');
+    if (el) {
+        el.classList.remove('is-visible');
+        el.innerHTML = '';
+    }
+    if (consumerSeekHintTimerId) {
+        clearTimeout(consumerSeekHintTimerId);
+        consumerSeekHintTimerId = null;
+    }
+}
+
+function showConsumerSeekingStatus(opts) {
+    const el = document.getElementById('consumerFetchStatus');
+    if (!el) return;
+    const partLabel = opts.partition != null && opts.partition !== ''
+        ? `partition ${opts.partition}`
+        : 'all partitions';
+    const off = opts.offset != null && String(opts.offset) !== '' ? String(opts.offset) : '(unspecified)';
+    el.innerHTML = `<span class="consumer-fetch-spinner" aria-hidden="true"></span><span class="consumer-fetch-text">Seeking to offset ${off} on ${partLabel} — waiting for messages…</span>`;
+    el.classList.add('is-visible');
+    if (consumerSeekHintTimerId) {
+        clearTimeout(consumerSeekHintTimerId);
+        consumerSeekHintTimerId = null;
+    }
+    consumerSeekHintTimerId = setTimeout(() => {
+        const text = el.querySelector('.consumer-fetch-text');
+        if (text && el.classList.contains('is-visible')) {
+            text.textContent = 'Still waiting — the offset may be past the end of the log, or there may be no messages yet.';
+        }
+        consumerSeekHintTimerId = null;
+    }, 10000);
 }
 
 function renderConsumerTabBlink(show) {
@@ -227,6 +384,15 @@ function applyActiveMethodLayout() {
     if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
     const optionsSection = document.getElementById('topics');
     if (optionsSection) optionsSection.style.display = hideTopicsChrome ? 'none' : '';
+
+    const producerOptionsSection = document.getElementById('optionsProducerSection');
+    const consumerOptionsSection = document.getElementById('optionsConsumerSection');
+    if (producerOptionsSection) {
+        producerOptionsSection.style.display = activeMethod === 'producer' ? '' : 'none';
+    }
+    if (consumerOptionsSection) {
+        consumerOptionsSection.style.display = activeMethod === 'consumer' ? '' : 'none';
+    }
 
     const envCard = document.getElementById('summaryCardActiveEnv');
     const groupCard = document.getElementById('summaryCardConsumerGroup');
@@ -288,7 +454,7 @@ async function loadConfig() {
             console.error('Error reading or parsing the config file:', error);
             hideLoading();
             closeAlert();
-            ipcRenderer.send('open-setup-window');
+            ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
             await new Promise((resolve) => {
                 ipcRenderer.once('setup-window-closed', resolve);
             });
@@ -297,7 +463,7 @@ async function loadConfig() {
     } else {
         hideLoading();
         closeAlert();
-        ipcRenderer.send('open-setup-window');
+        ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
         await new Promise((resolve) => {
             ipcRenderer.once('setup-window-closed', resolve);
         });
@@ -320,8 +486,9 @@ function initializeEditor() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
+        mode: { name: 'javascript', json: true },
         theme: 'default',
-        placeholder: 'Enter a JSON payload...',
+        placeholder: 'Enter the payload...',
     });
 }
 
@@ -341,25 +508,189 @@ function initializeConsumer() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
+        mode: { name: 'javascript', json: true },
         theme: 'default',
         placeholder: 'Consumed messages will display here...',
     });
 }
 
-function formatConsumedEntry(msg) {
-    let body = msg.value;
-    try {
-        body = JSON.stringify(JSON.parse(msg.value), null, 2);
-    } catch (_) { /* keep as-is */ }
-    const meta = `// partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
-        (msg.key ? ` key=${msg.key}` : '');
-    return `${meta}\n${body}`;
+function validatePayload(format, text) {
+    if (format === 'text') return true;
+    const raw = text == null ? '' : String(text);
+    if (format === 'json') {
+        try {
+            JSON.parse(raw);
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+    if (format === 'xml') {
+        const trimmed = raw.trim();
+        if (!trimmed) return false;
+        const doc = new DOMParser().parseFromString(raw, 'application/xml');
+        return !doc.querySelector('parsererror');
+    }
+    return false;
 }
 
-function applyFilter() {
+function formatPayloadXml(text) {
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.querySelector('parsererror')) throw new Error('Invalid XML');
+
+    function escAttr(v) {
+        return String(v)
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;');
+    }
+
+    function walk(node, depth) {
+        const pad = '  '.repeat(depth);
+        if (node.nodeType === 3) {
+            const t = node.textContent;
+            if (!t || !t.trim()) return '';
+            return `${pad}${t.trim()}\n`;
+        }
+        if (node.nodeType !== 1) return '';
+        let out = '';
+        let attrs = '';
+        for (let i = 0; i < node.attributes.length; i += 1) {
+            const a = node.attributes[i];
+            attrs += ` ${a.name}="${escAttr(a.value)}"`;
+        }
+        const childEls = [...node.childNodes].filter((n) => n.nodeType === 1);
+        const textNodes = [...node.childNodes].filter((n) => n.nodeType === 3);
+        const textJoined = textNodes.map((n) => n.textContent.trim()).filter(Boolean).join(' ');
+        if (!childEls.length && !textJoined) {
+            return `${pad}<${node.nodeName}${attrs}/>\n`;
+        }
+        out += `${pad}<${node.nodeName}${attrs}>\n`;
+        if (textJoined) out += `${'  '.repeat(depth + 1)}${textJoined}\n`;
+        for (const ch of childEls) out += walk(ch, depth + 1);
+        out += `${pad}</${node.nodeName}>\n`;
+        return out;
+    }
+
+    return walk(doc.documentElement, 0).trimEnd();
+}
+
+function formatPayload(format, text) {
+    if (format === 'json') {
+        return JSON.stringify(JSON.parse(text), null, 2);
+    }
+    if (format === 'xml') {
+        return formatPayloadXml(text);
+    }
+    return text;
+}
+
+function applyEditorMode(cmEditor, formatId) {
+    const spec = PAYLOAD_FORMATS[formatId] || PAYLOAD_FORMATS[DEFAULT_FORMAT];
+    if (!cmEditor) return;
+    cmEditor.setOption('mode', spec.cmMode);
+}
+
+function revalidateProducerPayload() {
+    const formatButton = document.getElementById('formatButton');
+    if (!editor) return;
+    const text = editor.getValue();
+    validPayload = validatePayload(producerFormat, text);
+    if (formatButton) {
+        formatButton.disabled = !validPayload || producerFormat === 'text';
+    }
+    reloadProduceButton();
+}
+
+function applyProducerFormat(format, { skipStorage } = {}) {
+    const id = PAYLOAD_FORMATS[format] ? format : DEFAULT_FORMAT;
+    producerFormat = id;
+    const sel = document.getElementById('producerFormatSelect');
+    if (sel) sel.value = producerFormat;
+    if (editor) applyEditorMode(editor, producerFormat);
+    revalidateProducerPayload();
+    if (!skipStorage) {
+        try {
+            window.localStorage.setItem(PRODUCER_FORMAT_STORAGE_KEY, producerFormat);
+        } catch (_) { /* ignore */ }
+    }
+}
+
+function applyConsumerFormat(format, { skipStorage } = {}) {
+    const id = PAYLOAD_FORMATS[format] ? format : DEFAULT_FORMAT;
+    consumerFormat = id;
+    const sel = document.getElementById('consumerFormatSelect');
+    if (sel) sel.value = consumerFormat;
+    if (consumer) applyEditorMode(consumer, consumerFormat);
+    applyFilter();
+    if (!skipStorage) {
+        try {
+            window.localStorage.setItem(CONSUMER_FORMAT_STORAGE_KEY, consumerFormat);
+        } catch (_) { /* ignore */ }
+    }
+}
+
+function loadConsumerTableViewPreference() {
+    const prefs = loadPreferences();
+    consumerTableView = !!prefs.consumerTableView;
+    const toggle = document.getElementById('consumerTableViewToggle');
+    if (toggle) toggle.checked = consumerTableView;
+}
+
+function persistConsumerTableViewPreference(on) {
+    const prefs = loadPreferences();
+    prefs.consumerTableView = !!on;
+    savePreferences(prefs);
+}
+
+function decodeHeaderValue(v) {
+    if (v == null) return '';
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(v)) return v.toString('utf8');
+    if (v instanceof Uint8Array) return Buffer.from(v).toString('utf8');
+    if (typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+        return Buffer.from(v.data).toString('utf8');
+    }
+    return String(v);
+}
+
+function normalizeHeaders(headers) {
+    const out = {};
+    if (!headers || typeof headers !== 'object') return out;
+    for (const [k, v] of Object.entries(headers)) {
+        out[k] = decodeHeaderValue(v);
+    }
+    return out;
+}
+
+function collectHeaderKeysFromMessages(messages) {
+    const set = new Set();
+    for (const m of messages) {
+        const h = normalizeHeaders(m.headers || {});
+        Object.keys(h).forEach((k) => set.add(k));
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+function formatTimestampDisplay(ts) {
+    if (ts == null || ts === '') return '—';
+    const n = Number(ts);
+    if (Number.isFinite(n)) {
+        const d = new Date(n);
+        if (!Number.isNaN(d.getTime())) {
+            const pad = (x) => String(x).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+                + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        }
+    }
+    return String(ts);
+}
+
+/**
+ * Filter matches message key and value only (not record headers).
+ */
+function getFilteredConsumedMessages() {
     const filterInput = document.getElementById('filterInput');
     const regexToggle = document.getElementById('filterRegex');
-    const messageCount = document.getElementById('messageCount');
     const term = (filterInput && filterInput.value) || '';
     const useRegex = regexToggle && regexToggle.checked;
 
@@ -379,19 +710,359 @@ function applyFilter() {
                 String(m.key || '').toLowerCase().includes(lower));
         }
     }
+    return filtered;
+}
+
+function formatPayloadForViewer(raw, formatId) {
+    const id = PAYLOAD_FORMATS[formatId] ? formatId : DEFAULT_FORMAT;
+    const text = raw != null ? String(raw) : '';
+    if (id === 'text') return text;
+    try {
+        return formatPayload(id, text);
+    } catch (_) {
+        return text;
+    }
+}
+
+const PAYLOAD_VIEWER_STORAGE_KEY = 'kssPayloadViewer';
+
+function openConsumerMessagePayloadWindow(msg) {
+    if (!msg) return;
+    const raw = msg.value != null ? String(msg.value) : '';
+    const theme = document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    const fmtId = PAYLOAD_FORMATS[consumerFormat] ? consumerFormat : DEFAULT_FORMAT;
+    const display = formatPayloadForViewer(raw, fmtId);
+    try {
+        sessionStorage.setItem(PAYLOAD_VIEWER_STORAGE_KEY, JSON.stringify({
+            text: display,
+            theme,
+            formatId: fmtId,
+        }));
+    } catch (err) {
+        showAlert('View payload', 'Could not store payload for the viewer (too large or storage unavailable).');
+        return;
+    }
+    let url;
+    try {
+        url = new URL('payload-viewer.html', window.location.href).href;
+    } catch (_) {
+        url = 'payload-viewer.html';
+    }
+    const w = window.open(url, '_blank', 'width=920,height=720,scrollbars=yes');
+    if (!w) {
+        try {
+            sessionStorage.removeItem(PAYLOAD_VIEWER_STORAGE_KEY);
+        } catch (_) { /* ignore */ }
+        showAlert('View payload', 'Could not open a new window (popup blocker or OS restriction).');
+    }
+}
+
+function wireConsumerTablePayloadViewer() {
+    const wrap = document.getElementById('consumedMessagesTableWrap');
+    if (!wrap || consumerTablePayloadClickBound) return;
+    consumerTablePayloadClickBound = true;
+    wrap.addEventListener('click', (e) => {
+        const btn = e.target.closest('.consumer-view-payload-btn');
+        const valueCell = e.target.closest('.consumer-msg-value-cell--openable');
+        if (!btn && !valueCell) return;
+        const tr = (btn || valueCell).closest('tr');
+        if (!tr || tr.querySelector('.consumer-msg-empty')) return;
+        const idx = parseInt(tr.getAttribute('data-msg-index') || '', 10);
+        if (!Number.isFinite(idx)) return;
+        const msg = lastConsumerTableFilteredSnapshot[idx];
+        if (!msg) return;
+        const val = msg.value != null ? String(msg.value) : '';
+        if (!val) return;
+        if (btn) e.preventDefault();
+        openConsumerMessagePayloadWindow(msg);
+    });
+
+    wrap.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const valueCell = e.target.closest('.consumer-msg-value-cell--openable');
+        if (!valueCell) return;
+        e.preventDefault();
+        const tr = valueCell.closest('tr');
+        if (!tr) return;
+        const idx = parseInt(tr.getAttribute('data-msg-index') || '', 10);
+        if (!Number.isFinite(idx)) return;
+        const msg = lastConsumerTableFilteredSnapshot[idx];
+        if (!msg) return;
+        const val = msg.value != null ? String(msg.value) : '';
+        if (!val) return;
+        openConsumerMessagePayloadWindow(msg);
+    });
+}
+
+function applyConsumerSurfaceVisibility() {
+    const cmHost = document.getElementById('consumedMessages');
+    const tableWrap = document.getElementById('consumedMessagesTableWrap');
+    if (!cmHost || !tableWrap) return;
+    if (consumerTableView) {
+        cmHost.style.display = 'none';
+        tableWrap.hidden = false;
+    } else {
+        cmHost.style.display = '';
+        tableWrap.hidden = true;
+        if (consumer) {
+            try {
+                consumer.refresh();
+            } catch (_) { /* ignore */ }
+        }
+    }
+}
+
+function renderConsumerTable(filtered) {
+    const thead = document.getElementById('consumedMessagesTableHead');
+    const tbody = document.getElementById('consumedMessagesTableBody');
+    if (!thead || !tbody) return;
+
+    lastConsumerTableFilteredSnapshot = filtered.slice();
+
+    const headerKeys = collectHeaderKeysFromMessages(filtered);
+    const fixedTh = ['Par', 'Offset', 'Timestamp', 'Key', 'Value'].map((label) => `<th>${escapeHtml(label)}</th>`).join('');
+    const dynTh = headerKeys.map((k) => `<th>${escapeHtml(k)}</th>`).join('');
+    thead.innerHTML = `<tr>${fixedTh}${dynTh}</tr>`;
+
+    if (filtered.length === 0) {
+        const colSpan = 5 + headerKeys.length;
+        tbody.innerHTML = `<tr><td class="consumer-msg-empty" colspan="${colSpan}">No messages yet.</td></tr>`;
+        return;
+    }
+
+    const maxCellOther = 200;
+    const valuePreviewMax = 120;
+    const trunc = (s, maxLen) => {
+        const t = s == null ? '' : String(s);
+        if (t.length <= maxLen) return { html: escapeHtml(t), title: '', truncated: false };
+        return {
+            html: `${escapeHtml(t.slice(0, maxLen))}…`,
+            title: escapeHtml(t),
+            truncated: true,
+        };
+    };
+
+    tbody.innerHTML = filtered.map((m, rowIdx) => {
+        const h = normalizeHeaders(m.headers || {});
+        const ts = formatTimestampDisplay(m.timestamp);
+        const keyDisp = trunc(m.key != null && m.key !== '' ? String(m.key) : '—', maxCellOther);
+        const valStr = m.value != null ? String(m.value) : '';
+        const valDisp = trunc(valStr, valuePreviewMax);
+        const keyTitle = keyDisp.title ? ` title="${keyDisp.title}"` : '';
+        const valueHasContent = valStr.length > 0;
+        const valueTitleAttr = valDisp.title
+            ? ` title="${valDisp.title}"`
+            : (valueHasContent ? ' title="Open full payload in new window (click or Enter)"' : '');
+        const valueCellAttrs = valueHasContent
+            ? ` class="consumer-msg-value-cell consumer-msg-value-cell--openable" tabindex="0" role="button" aria-label="Open full payload in new window"${valueTitleAttr}`
+            : ' class="consumer-msg-value-cell"';
+        const viewBtn = valueHasContent && valDisp.truncated
+            ? '<button type="button" class="consumer-view-payload-btn btn-secondary" title="Open full payload in new window">View</button>'
+            : '';
+        const valueInner = `<span class="consumer-msg-value-preview">${valDisp.html || '—'}</span>${viewBtn}`;
+        const fixedCells = `
+            <td>${escapeHtml(String(m.partition))}</td>
+            <td>${escapeHtml(String(m.offset))}</td>
+            <td class="consumer-msg-ts-cell">${escapeHtml(ts)}</td>
+            <td${keyTitle}>${keyDisp.html}</td>
+            <td${valueCellAttrs}>${valueInner}</td>`;
+        const dynCells = headerKeys.map((hk) => {
+            const raw = h[hk] != null && h[hk] !== '' ? String(h[hk]) : '—';
+            const d = trunc(raw === '—' ? '—' : raw, maxCellOther);
+            const tit = d.title ? ` title="${d.title}"` : '';
+            return `<td${tit}>${d.html}</td>`;
+        }).join('');
+        return `<tr data-msg-index="${rowIdx}">${fixedCells}${dynCells}</tr>`;
+    }).join('');
+
+    const wrap = document.getElementById('consumedMessagesTableWrap');
+    if (wrap) {
+        const sc = wrap.querySelector('.consumer-messages-table-scroll');
+        if (sc) sc.scrollTop = sc.scrollHeight;
+    }
+}
+
+function formatConsumedEntry(msg) {
+    let body = msg.value;
+    if (consumerFormat === 'json') {
+        try {
+            body = JSON.stringify(JSON.parse(msg.value), null, 2);
+        } catch (_) { /* keep as-is */ }
+    }
+    const metaLine = `partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
+        (msg.key ? ` key=${msg.key}` : '');
+    let meta;
+    if (consumerFormat === 'xml') {
+        meta = `<!-- ${metaLine} -->`;
+    } else if (consumerFormat === 'text') {
+        meta = `# ${metaLine}`;
+    } else {
+        meta = `// ${metaLine}`;
+    }
+    return `${meta}\n${body}`;
+}
+
+function applyFilter() {
+    const messageCount = document.getElementById('messageCount');
+    const filtered = getFilteredConsumedMessages();
+
+    if (messageCount) {
+        messageCount.textContent = `${filtered.length} / ${consumedMessages.length}`;
+    }
+
+    applyConsumerSurfaceVisibility();
+
+    if (consumerTableView) {
+        renderConsumerTable(filtered);
+        return;
+    }
+
+    if (!consumer) return;
 
     const text = filtered.map(formatConsumedEntry).join(LINE_SEPARATOR) +
         (filtered.length > 0 ? LINE_SEPARATOR : '');
     consumer.setValue(text);
     const lastLine = consumer.getScrollInfo().height;
     consumer.scrollTo(0, lastLine);
+}
 
-    if (messageCount) {
-        messageCount.textContent = `${filtered.length} / ${consumedMessages.length}`;
+function buildExportRows(messages) {
+    return messages.map((m) => ({
+        topic: m.topic,
+        partition: m.partition,
+        offset: m.offset,
+        timestamp: m.timestamp,
+        key: m.key,
+        value: m.value,
+        headers: normalizeHeaders(m.headers || {}),
+    }));
+}
+
+function collectHeaderKeysFromExportRows(rows) {
+    const set = new Set();
+    for (const r of rows) {
+        if (r.headers && typeof r.headers === 'object') {
+            Object.keys(r.headers).forEach((k) => set.add(k));
+        }
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+function escapeCsvCell(s) {
+    const str = s == null ? '' : String(s);
+    if (/[",\n\r]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+}
+
+function serializeExportCsv(rows) {
+    const headerKeys = collectHeaderKeysFromExportRows(rows);
+    const cols = ['partition', 'offset', 'timestamp', 'key', 'value', ...headerKeys];
+    const lines = [cols.join(',')];
+    for (const r of rows) {
+        const cells = [
+            r.partition,
+            r.offset,
+            r.timestamp,
+            r.key ?? '',
+            r.value ?? '',
+            ...headerKeys.map((hk) => (r.headers && r.headers[hk] != null) ? r.headers[hk] : ''),
+        ].map(escapeCsvCell);
+        lines.push(cells.join(','));
+    }
+    return `${lines.join('\n')}\n`;
+}
+
+function showExportFormatDialog() {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('prompt-modal');
+        const titleEl = document.getElementById('prompt-title');
+        const messageEl = document.getElementById('prompt-message');
+        const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
+        const formatSelect = document.getElementById('prompt-format-select');
+        const confirmBtn = document.getElementById('prompt-confirm');
+        const cancelBtn = document.getElementById('prompt-cancel');
+        const closeBtn = document.getElementById('prompt-close');
+
+        if (!modal || !formatWrap || !formatSelect) {
+            resolve(null);
+            return;
+        }
+
+        titleEl.textContent = 'Export consumed messages';
+        messageEl.textContent = 'Choose a format, then pick where to save the file.';
+        input.style.display = 'none';
+        formatWrap.style.display = 'block';
+        formatSelect.value = 'json';
+        modal.style.display = 'block';
+        setTimeout(() => formatSelect.focus(), 50);
+
+        const cleanup = (value) => {
+            modal.style.display = 'none';
+            input.style.display = '';
+            formatWrap.style.display = 'none';
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+            closeBtn.removeEventListener('click', onCancel);
+            formatSelect.removeEventListener('keydown', onKey);
+            resolve(value);
+        };
+        const onConfirm = () => cleanup(formatSelect.value || null);
+        const onCancel = () => cleanup(null);
+        const onKey = (e) => {
+            if (e.key === 'Enter') onConfirm();
+            if (e.key === 'Escape') onCancel();
+        };
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+        closeBtn.addEventListener('click', onCancel);
+        formatSelect.addEventListener('keydown', onKey);
+    });
+}
+
+async function handleExportConsumed() {
+    const filtered = getFilteredConsumedMessages();
+    if (!filtered.length) {
+        showAlert('Export', 'Nothing to export.');
+        return;
+    }
+    const format = await showExportFormatDialog();
+    if (!format || !['json', 'jsonl', 'csv'].includes(format)) return;
+
+    const defaultPath = format === 'json' ? 'consumed-messages.json'
+        : format === 'jsonl' ? 'consumed-messages.jsonl'
+            : 'consumed-messages.csv';
+    const result = await ipcRenderer.invoke('save-consumed-export', {
+        defaultPath,
+        filters: [
+            { name: 'JSON', extensions: ['json'] },
+            { name: 'JSON Lines', extensions: ['jsonl', 'ndjson'] },
+            { name: 'CSV', extensions: ['csv'] },
+        ],
+    });
+    if (!result || result.canceled || !result.filePath) return;
+
+    const rows = buildExportRows(filtered);
+    let body;
+    if (format === 'json') {
+        body = JSON.stringify(rows, null, 2);
+    } else if (format === 'jsonl') {
+        body = rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : '');
+    } else {
+        body = serializeExportCsv(rows);
+    }
+    try {
+        fs.writeFileSync(result.filePath, body, 'utf8');
+        showAlert('Export', `Saved ${filtered.length} message(s).`);
+    } catch (err) {
+        showAlert('Export failed', err.message || String(err));
     }
 }
 
 function pushConsumedMessage(msg) {
+    hideConsumerSeekingStatus();
     consumedMessages.push(msg);
     applyFilter();
 }
@@ -472,9 +1143,12 @@ function showPrompt(title, message, defaultValue = '') {
         const titleEl = document.getElementById('prompt-title');
         const messageEl = document.getElementById('prompt-message');
         const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
         const confirmBtn = document.getElementById('prompt-confirm');
         const cancelBtn = document.getElementById('prompt-cancel');
         const closeBtn = document.getElementById('prompt-close');
+        if (formatWrap) formatWrap.style.display = 'none';
+        input.style.display = '';
         titleEl.textContent = title;
         messageEl.textContent = message;
         input.value = defaultValue;
@@ -508,9 +1182,11 @@ function showConfirm(title, message) {
         const titleEl = document.getElementById('prompt-title');
         const messageEl = document.getElementById('prompt-message');
         const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
         const confirmBtn = document.getElementById('prompt-confirm');
         const cancelBtn = document.getElementById('prompt-cancel');
         const closeBtn = document.getElementById('prompt-close');
+        if (formatWrap) formatWrap.style.display = 'none';
         titleEl.textContent = title;
         messageEl.textContent = message;
         input.value = '';
@@ -574,6 +1250,7 @@ function resetConsumerIdleWatchdog() {
 }
 
 function resetConsumeUIState() {
+    hideConsumerSeekingStatus();
     if (window.refreshIntervalId) {
         clearInterval(window.refreshIntervalId);
         window.refreshIntervalId = null;
@@ -581,7 +1258,7 @@ function resetConsumeUIState() {
     renderConsumerTabBlink(false);
     setConsumeRunningUI(false);
     consumeStarted = false;
-    applyReadOnlyState();
+    applyConsumerGroupFieldState();
 }
 
 async function stopConsumingAndResetUI() {
@@ -718,12 +1395,18 @@ function renderTopicsTable() {
                 <button class="btn-secondary" data-action="lag" title="Open Consumer lag for this topic">Lag</button>
             </td>
         `;
-        tr.querySelector('[data-action="produce"]').addEventListener('click', () => {
-            useTopic(t.name, 'producer');
-        });
-        tr.querySelector('[data-action="consume"]').addEventListener('click', () => {
-            useTopic(t.name, 'consumer');
-        });
+        const produceBtn = tr.querySelector('[data-action="produce"]');
+        if (produceBtn) {
+            produceBtn.addEventListener('click', () => {
+                useTopic(t.name, 'producer');
+            });
+        }
+        const consumeBtn = tr.querySelector('[data-action="consume"]');
+        if (consumeBtn) {
+            consumeBtn.addEventListener('click', () => {
+                useTopic(t.name, 'consumer');
+            });
+        }
         tr.querySelector('[data-action="lag"]').addEventListener('click', () => {
             navigateToConsumerLag(t.name);
         });
@@ -744,12 +1427,176 @@ function clearLagOverviewUI(message) {
     const body = document.getElementById('lagTableBody');
     const empty = document.getElementById('lagEmptyState');
     const status = document.getElementById('lagStatus');
+    lagOverviewData = null;
     if (body) body.innerHTML = '';
     if (empty) {
         empty.textContent = message || 'Select a topic and click Load.';
         empty.style.display = 'block';
     }
     if (status) status.textContent = '';
+    setLagResetControlsState();
+}
+
+function setLagResetControlsState() {
+    const bulkBtn = document.getElementById('lagResetAllButton');
+    const bulkDelBtn = document.getElementById('lagDeleteAllButton');
+    const hasGroups = !!(lagOverviewData && Array.isArray(lagOverviewData.groups) && lagOverviewData.groups.length);
+    const busy = lagResetInFlight;
+    if (bulkBtn) {
+        bulkBtn.disabled = busy || !hasGroups;
+    }
+    if (bulkDelBtn) {
+        bulkDelBtn.disabled = busy || !hasGroups;
+    }
+    document.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.disabled = busy;
+    });
+    document.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
+        btn.disabled = busy;
+    });
+}
+
+async function confirmLagReset(scope, topic, groupIds) {
+    const scopeLabel = scope === 'bulk' ? 'all shown groups' : `group "${groupIds[0]}"`;
+    const confirmed = await showConfirm(
+        'Reset offsets to latest?',
+        `You are about to reset committed offsets for ${scopeLabel} on topic "${topic}". This can immediately clear lag. Active consumers may commit different offsets again after this action. Continue?`
+    );
+    if (!confirmed) return null;
+
+    const reasonRaw = await showPrompt(
+        'Offset reset reason',
+        'Enter a reason for auditing this action.',
+        ''
+    );
+    if (reasonRaw === null) return null;
+    const reason = String(reasonRaw || '').trim();
+    if (!reason) {
+        showAlert('Offset reset', 'Reason is required.');
+        return null;
+    }
+    return reason;
+}
+
+async function confirmLagDelete(scope, topic, groupIds) {
+    const scopeLabel = scope === 'bulk'
+        ? `all ${groupIds.length} group(s) currently listed for topic "${topic}"`
+        : `consumer group "${groupIds[0]}"`;
+    return showConfirm(
+        'Delete consumer group(s)?',
+        `This will permanently remove ${scopeLabel} from the cluster (group metadata and committed offsets). Kafka only allows deletion when a group has no active members (state Empty or Dead). Stop any consumers using this group first. This cannot be undone. Continue?`
+    );
+}
+
+async function handleLagDelete(scope, groupIds) {
+    const topic = lagTopic;
+    if (!topic) {
+        showAlert('Delete consumer group', 'Select a topic first.');
+        return;
+    }
+    const targets = [...new Set((groupIds || []).filter(Boolean))];
+    if (!targets.length) {
+        showAlert('Delete consumer group', 'No consumer groups selected.');
+        return;
+    }
+    const confirmed = await confirmLagDelete(scope, topic, targets);
+    if (!confirmed) return;
+
+    lagResetInFlight = true;
+    setLagResetControlsState();
+    showLoading();
+    try {
+        const kafka = await getKafkaClient();
+        const details = await deleteConsumerGroups(kafka, { groupIds: targets });
+        if (details.failureCount === 0) {
+            showAlert('Consumer group deleted', `Deleted ${details.successCount} group(s).`);
+        } else if (details.successCount > 0) {
+            const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
+            showAlert('Delete consumer groups (partial)', `Removed ${details.successCount} group(s); ${details.failureCount} failed. Example: ${firstErr}`);
+        } else {
+            const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
+            showAlert('Delete consumer groups failed', firstErr);
+        }
+        await loadConsumerLagOverview();
+    } catch (err) {
+        showAlert('Delete consumer groups failed', err.message || String(err));
+    } finally {
+        lagResetInFlight = false;
+        hideLoading();
+        setLagResetControlsState();
+    }
+}
+
+async function handleLagReset(scope, groupIds) {
+    const topic = lagTopic;
+    if (!topic) {
+        showAlert('Offset reset', 'Select a topic first.');
+        return;
+    }
+    const targets = [...new Set((groupIds || []).filter(Boolean))];
+    if (!targets.length) {
+        showAlert('Offset reset', 'No consumer groups available to reset.');
+        return;
+    }
+    const reason = await confirmLagReset(scope, topic, targets);
+    if (reason === null) return;
+
+    const osUsername = (() => {
+        try {
+            return os.userInfo().username || process.env.USERNAME || process.env.USER || 'unknown';
+        } catch (_) {
+            return process.env.USERNAME || process.env.USER || 'unknown';
+        }
+    })();
+
+    lagResetInFlight = true;
+    setLagResetControlsState();
+    showLoading();
+    try {
+        const kafka = await getKafkaClient();
+        let outcome = 'success';
+        let details;
+
+        if (scope === 'bulk') {
+            details = await resetConsumerGroupsOffsetsToLatest(kafka, { topic, groupIds: targets });
+            if (details.failureCount > 0 && details.successCount > 0) outcome = 'partial';
+            if (details.failureCount > 0 && details.successCount === 0) outcome = 'failed';
+            if (outcome === 'success') {
+                showAlert('Offset reset', `Reset offsets to latest for ${details.successCount} group(s) on "${topic}".`);
+            } else if (outcome === 'partial') {
+                showAlert('Offset reset (partial)', `Reset succeeded for ${details.successCount} group(s), failed for ${details.failureCount}.`);
+            } else {
+                const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
+                showAlert('Offset reset failed', firstErr);
+            }
+        } else {
+            details = await resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId: targets[0] });
+            showAlert('Offset reset', `Reset offsets to latest for "${targets[0]}" on "${topic}".`);
+        }
+
+        try {
+            appendOffsetResetAudit({
+                scope,
+                topic,
+                groupIds: targets,
+                operatorReason: reason,
+                osUsername,
+                activeEnv,
+                outcome,
+                details,
+            });
+        } catch (auditErr) {
+            console.warn('Failed to append offset reset audit log:', auditErr);
+        }
+
+        await loadConsumerLagOverview();
+    } catch (err) {
+        showAlert('Offset reset failed', err.message || String(err));
+    } finally {
+        lagResetInFlight = false;
+        hideLoading();
+        setLagResetControlsState();
+    }
 }
 
 function populateLagTopicSelect() {
@@ -783,6 +1630,7 @@ function renderLagOverviewResult(data) {
     const empty = document.getElementById('lagEmptyState');
     const status = document.getElementById('lagStatus');
     if (!body || !empty || !status) return;
+    lagOverviewData = data;
 
     status.textContent = `Scanned ${data.scannedGroupCount} groups — ${data.matchedGroupCount} with commits on "${data.topic}".`;
 
@@ -790,6 +1638,7 @@ function renderLagOverviewResult(data) {
         body.innerHTML = '';
         empty.textContent = 'No consumer groups have committed offsets for this topic yet.';
         empty.style.display = 'block';
+        setLagResetControlsState();
         return;
     }
 
@@ -815,10 +1664,41 @@ function renderLagOverviewResult(data) {
                 <td>${committedCell}</td>
                 <td>${escapeHtml(String(pr.logEnd))}</td>
                 <td>${lagCell}</td>
+                <td class="lag-action-cell lag-col-actions">
+                    <div class="lag-action-buttons">
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
+                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
+                    </div>
+                </td>
             `;
             body.appendChild(tr);
         }
     }
+    body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-reset-group') || '');
+            } catch (_) {
+                return;
+            }
+            if (!groupId) return;
+            handleLagReset('single', [groupId]);
+        });
+    });
+    body.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-delete-group') || '');
+            } catch (_) {
+                return;
+            }
+            if (!groupId) return;
+            handleLagDelete('single', [groupId]);
+        });
+    });
+    setLagResetControlsState();
 }
 
 async function loadConsumerLagOverview() {
@@ -838,6 +1718,7 @@ async function loadConsumerLagOverview() {
         clearLagOverviewUI();
     } finally {
         hideLoading();
+        setLagResetControlsState();
     }
 }
 
@@ -849,7 +1730,9 @@ async function navigateToConsumerLag(topicName) {
     lagTopic = topicName;
     populateTopicSelect();
     clearLagOverviewUI();
-    onMethodTabClick(document.getElementById('consumerLag'));
+    const lagTab = document.getElementById('consumerLag');
+    if (!lagTab) return;
+    onMethodTabClick(lagTab);
     await loadConsumerLagOverview();
 }
 
@@ -976,6 +1859,25 @@ function wireClusterOverviewControls() {
 function wireLagOverviewControls() {
     const btn = document.getElementById('lagLoadButton');
     if (btn) btn.addEventListener('click', () => loadConsumerLagOverview());
+    const resetAllBtn = document.getElementById('lagResetAllButton');
+    if (resetAllBtn) {
+        resetAllBtn.addEventListener('click', () => {
+            const ids = (lagOverviewData && Array.isArray(lagOverviewData.groups))
+                ? lagOverviewData.groups.map((g) => g.groupId).filter(Boolean)
+                : [];
+            handleLagReset('bulk', ids);
+        });
+    }
+    const deleteAllBtn = document.getElementById('lagDeleteAllButton');
+    if (deleteAllBtn) {
+        deleteAllBtn.addEventListener('click', () => {
+            const ids = (lagOverviewData && Array.isArray(lagOverviewData.groups))
+                ? lagOverviewData.groups.map((g) => g.groupId).filter(Boolean)
+                : [];
+            handleLagDelete('bulk', ids);
+        });
+    }
+    setLagResetControlsState();
 }
 
 function ensureTopicInList(topicName) {
@@ -993,11 +1895,17 @@ async function useTopic(topicName, methodId) {
 
 document.addEventListener('DOMContentLoaded', async () => {
     initializeThemeToggle();
-    initializeReadOnlyToggle();
+    loadAppMode();
+    applyAppModeToBody();
+    initializeAppModeToggle();
     showLoading();
     loadConfig().then(() => {
-        activeEnv = Object.keys(envConfig)[0];
+        const envIds = Object.keys(envConfig);
+        const prefs = loadPreferences();
+        const savedEnv = prefs.lastActiveEnvId;
+        activeEnv = (savedEnv && envIds.includes(savedEnv)) ? savedEnv : envIds[0];
         activeTopicList = (envConfig[activeEnv].topicList || []).slice();
+        activeMethod = resolveMethodForEnv(activeEnv);
 
         initializeEditor();
         initializeConsumer();
@@ -1006,6 +1914,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const envSelect = document.getElementById('envSelect');
         const formatButton = document.getElementById('formatButton');
+
+        const producerFormatSelect = document.getElementById('producerFormatSelect');
+        if (producerFormatSelect) {
+            producerFormatSelect.addEventListener('change', (e) => {
+                applyProducerFormat(e.target.value);
+            });
+        }
+        let storedProducerFormat = null;
+        try {
+            storedProducerFormat = window.localStorage.getItem(PRODUCER_FORMAT_STORAGE_KEY);
+        } catch (_) { /* ignore */ }
+        applyProducerFormat(PAYLOAD_FORMATS[storedProducerFormat] ? storedProducerFormat : DEFAULT_FORMAT, { skipStorage: true });
 
         Object.values(envConfig).forEach((env) => {
             const option = document.createElement('option');
@@ -1018,13 +1938,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             onEnvChange(event.target.value);
         });
 
-        const methodTabContainer = document.getElementById('tabs');
-        Object.values(method).forEach((m) => buildMethodTab(methodTabContainer, m));
-
-        Object.values(method).forEach((m) => {
-            document.getElementById(m.containerId).style.display =
-                m.id === activeMethod ? 'flex' : 'none';
-        });
+        rebuildMethodTabs();
 
         onEnvChange(activeEnv);
         updateSummaryCards();
@@ -1067,7 +1981,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                     updateSummaryCards();
 
                     const kafka = await getKafkaClient();
+                    setConsumerConsumeSummary(opts);
                     setConsumeRunningUI(true);
+                    if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
+                        showConsumerSeekingStatus({
+                            partition: opts.partition,
+                            offset: opts.offset,
+                        });
+                    }
                     consumeMessages(kafka, opts, (msg) => {
                         pushConsumedMessage(msg);
                     }, () => {
@@ -1087,7 +2008,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         consumerBlinkOn = !consumerBlinkOn;
                         renderConsumerTabBlink(consumerBlinkOn);
                     }, 1000);
-                    applyReadOnlyState();
+                    applyConsumerGroupFieldState();
                     if (!document.hasFocus()) {
                         scheduleConsumerBlurIdleTimer();
                     }
@@ -1107,28 +2028,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
 
         document.getElementById('payload').addEventListener('keyup', () => {
-            try {
-                JSON.parse(editor.getValue());
-                validPayload = true;
-                formatButton.disabled = false;
-            } catch (_) {
-                validPayload = false;
-                formatButton.disabled = true;
-            }
-            reloadProduceButton();
+            revalidateProducerPayload();
+        });
+        document.getElementById('payload').addEventListener('input', () => {
+            revalidateProducerPayload();
         });
 
         formatButton.addEventListener('click', () => {
             try {
-                const formatted = JSON.stringify(JSON.parse(editor.getValue()), null, 2);
+                const formatted = formatPayload(producerFormat, editor.getValue());
                 editor.setValue(formatted);
             } catch (error) {
-                showAlert('JSON Format Error', 'Error formatting JSON. Please check the JSON and try again.');
+                const label = (PAYLOAD_FORMATS[producerFormat] || PAYLOAD_FORMATS[DEFAULT_FORMAT]).label;
+                showAlert(`${label} format error`, error.message || 'Could not format the payload.');
             }
-            reloadProduceButton();
+            revalidateProducerPayload();
         });
 
         wireConsumerControls();
+        let storedConsumerFormat = null;
+        try {
+            storedConsumerFormat = window.localStorage.getItem(CONSUMER_FORMAT_STORAGE_KEY);
+        } catch (_) { /* ignore */ }
+        applyConsumerFormat(PAYLOAD_FORMATS[storedConsumerFormat] ? storedConsumerFormat : DEFAULT_FORMAT, { skipStorage: true });
+
         wireTemplateControls();
         wireTopicsBrowserControls();
         wireLagOverviewControls();
@@ -1157,9 +2080,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 });
 
+function formatConsumeSummaryText(opts) {
+    if (!opts) return '';
+    let startLine;
+    const sm = opts.startMode || 'latest';
+    if (sm === 'earliest') {
+        startLine = 'Beginning';
+    } else if (sm === 'offset') {
+        const partLabel = opts.partition == null ? 'All partitions' : `Partition ${opts.partition}`;
+        const off = opts.offset != null && String(opts.offset) !== ''
+            ? String(opts.offset)
+            : '—';
+        startLine = `Specific offset (${partLabel}, offset ${off})`;
+    } else {
+        startLine = 'Now (latest)';
+    }
+    const parts = [`Start from: ${startLine}`];
+    if (opts.maxMessages != null && Number.isFinite(Number(opts.maxMessages))) {
+        parts.push(`Max messages: ${opts.maxMessages}`);
+    }
+    return parts.join(' · ');
+}
+
+function setConsumerConsumeSummary(opts) {
+    const text = opts ? formatConsumeSummaryText(opts) : '';
+    const hidden = !opts;
+    ['consumerConsumeSummary', 'consumerOptionsConsumeSummary'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.hidden = hidden;
+    });
+}
+
 function setConsumeRunningUI(running) {
     const consumeBtn = document.getElementById('consumeButton');
     if (!consumeBtn) return;
+    const optionsSection = document.getElementById('optionsConsumerSection');
+    if (optionsSection) {
+        optionsSection.classList.toggle('is-consuming', !!running);
+    }
+    if (!running) {
+        setConsumerConsumeSummary(null);
+    }
     consumeBtn.innerHTML = running ? 'Stop Consuming' : 'Start Consuming';
     consumeBtn.style.backgroundColor = running ? '#dc3545' : '';
     consumeBtn.disabled = !running && (consumerTopic === '');
@@ -1173,11 +2136,21 @@ function setConsumeRunningUI(running) {
 }
 
 function readConsumerOptions() {
+    const maxMessagesRaw = document.getElementById('maxMessagesInput').value;
+    const groupRaw = document.getElementById('consumerGroupInput').value.trim();
+    if (appMode === 'basic') {
+        return {
+            topic: consumerTopic,
+            groupId: groupRaw || DEFAULT_GROUP,
+            startMode: 'latest',
+            partition: null,
+            offset: null,
+            maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
+        };
+    }
     const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'latest';
     const partitionRaw = document.getElementById('partitionSelect').value;
     const offsetRaw = document.getElementById('offsetInput').value;
-    const maxMessagesRaw = document.getElementById('maxMessagesInput').value;
-    const groupRaw = document.getElementById('consumerGroupInput').value.trim();
     return {
         topic: consumerTopic,
         groupId: groupRaw || DEFAULT_GROUP,
@@ -1189,6 +2162,27 @@ function readConsumerOptions() {
 }
 
 function wireConsumerControls() {
+    loadConsumerTableViewPreference();
+    const tableToggle = document.getElementById('consumerTableViewToggle');
+    if (tableToggle) {
+        tableToggle.addEventListener('change', () => {
+            consumerTableView = tableToggle.checked;
+            persistConsumerTableViewPreference(consumerTableView);
+            applyFilter();
+        });
+    }
+
+    const exportBtn = document.getElementById('exportConsumedButton');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', () => {
+            handleExportConsumed().catch((err) => {
+                showAlert('Export failed', err.message || String(err));
+            });
+        });
+    }
+
+    wireConsumerTablePayloadViewer();
+
     const startModeRadios = document.querySelectorAll('input[name="startMode"]');
     const offsetRow = document.getElementById('offsetRow');
     startModeRadios.forEach((r) => {
@@ -1220,6 +2214,13 @@ function wireConsumerControls() {
             }
         });
     }
+
+    const consumerFormatSelect = document.getElementById('consumerFormatSelect');
+    if (consumerFormatSelect) {
+        consumerFormatSelect.addEventListener('change', (e) => {
+            applyConsumerFormat(e.target.value);
+        });
+    }
 }
 
 function wireTemplateControls() {
@@ -1241,15 +2242,7 @@ function wireTemplateControls() {
             const tpl = templatesApi.getTemplate(selectedTemplateId);
             if (tpl && editor) {
                 editor.setValue(tpl.payload || '');
-                try {
-                    JSON.parse(editor.getValue());
-                    validPayload = true;
-                    document.getElementById('formatButton').disabled = false;
-                } catch (_) {
-                    validPayload = false;
-                    document.getElementById('formatButton').disabled = true;
-                }
-                reloadProduceButton();
+                applyProducerFormat(tpl.format || DEFAULT_FORMAT, { skipStorage: true });
             }
         });
     }
@@ -1258,7 +2251,11 @@ function wireTemplateControls() {
             const name = await showPrompt('Save template', 'Template name:', '');
             if (!name) return;
             try {
-                const tpl = templatesApi.saveTemplate({ name, payload: editor ? editor.getValue() : '' });
+                const tpl = templatesApi.saveTemplate({
+                    name,
+                    payload: editor ? editor.getValue() : '',
+                    format: producerFormat,
+                });
                 selectedTemplateId = tpl.id;
                 refreshTemplateSelect();
             } catch (err) {
@@ -1272,6 +2269,7 @@ function wireTemplateControls() {
             try {
                 templatesApi.updateTemplate(selectedTemplateId, {
                     payload: editor ? editor.getValue() : '',
+                    format: producerFormat,
                 });
                 refreshTemplateSelect();
             } catch (err) {
@@ -1310,7 +2308,7 @@ function wireSetupButton() {
     const setupBtn = document.getElementById('setupButton');
     if (setupBtn) {
         setupBtn.addEventListener('click', () => {
-            ipcRenderer.send('open-setup-window');
+            ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
         });
     }
 }
@@ -1344,17 +2342,18 @@ async function reapplyConfig(newConfig) {
         const nextEnv = envIds.includes(activeEnv) ? activeEnv : envIds[0];
         envSelect.value = nextEnv;
         onEnvChange(nextEnv);
-        if (activeMethod === 'topicsBrowser') {
+        if (activeMethod === 'topicsBrowser' && document.getElementById('topicsBrowser')) {
             loadTopicsBrowser(true);
         }
     } finally {
         hideLoading();
-        applyReadOnlyState();
+        applyConsumerGroupFieldState();
     }
 }
 
 function reloadProduceButton() {
     const produceButton = document.getElementById('produceButton');
+    if (!produceButton) return;
     produceButton.disabled = producerTopic === '' || !validPayload;
 }
 
@@ -1376,8 +2375,14 @@ const onEnvChange = (envId) => {
         stopConsumeButton.disabled = true;
     }
 
-    activeMethod = 'producer';
-    onMethodTabClick(document.getElementById(activeMethod));
+    activeMethod = resolveMethodForEnv(activeEnv);
+    const methodTab = document.getElementById(activeMethod);
+    if (methodTab) {
+        onMethodTabClick(methodTab);
+    } else {
+        activeMethod = 'producer';
+        onMethodTabClick(document.getElementById('producer'));
+    }
     populateTopicSelect();
     lagTopic = '';
     populateLagTopicSelect();
@@ -1388,8 +2393,9 @@ const onEnvChange = (envId) => {
 
     reloadProduceButton();
     updateSummaryCards();
-    applyReadOnlyState();
+    applyConsumerGroupFieldState();
 
+    persistLastEnv(activeEnv);
     hideLoading();
 };
 
@@ -1416,12 +2422,15 @@ const onTopicChange = (topic, methodId) => {
     }
     reloadProduceButton();
     updateSummaryCards();
-    applyReadOnlyState();
+    applyConsumerGroupFieldState();
     hideLoading();
 };
 
 const onMethodTabClick = (tab) => {
     activeMethod = tab.id;
+    if (activeEnv) {
+        persistLastMethodForEnv(activeEnv, activeMethod);
+    }
     document.querySelectorAll('#tabs button').forEach((b) => b.classList.remove('active'));
     tab.classList.add('active');
 
@@ -1473,6 +2482,14 @@ const buildMethodTab = (methodTabContainer, m) => {
     tab.type = 'button';
     tab.id = m.id;
     tab.classList.add('tab');
+    tab.title = m.label;
+    if (m.icon) {
+        const icon = document.createElement('span');
+        icon.classList.add('tab-icon');
+        icon.setAttribute('aria-hidden', 'true');
+        icon.innerHTML = m.icon;
+        tab.appendChild(icon);
+    }
     const label = document.createElement('span');
     label.classList.add('tab-label');
     label.textContent = m.label;
@@ -1531,6 +2548,114 @@ function closeAlert() {
     alertBox.style.display = 'none';
 }
 
+const OPTIONS_WIDTH_STORAGE_KEY = 'kss-options-width';
+const OPTIONS_WIDTH_MIN = 268;
+const OPTIONS_WIDTH_MAX = 560;
+const OPTIONS_WIDTH_DEFAULT = 352;
+
+function clampOptionsWidth(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return OPTIONS_WIDTH_DEFAULT;
+    return Math.min(OPTIONS_WIDTH_MAX, Math.max(OPTIONS_WIDTH_MIN, Math.round(num)));
+}
+
+function applyOptionsWidth(width) {
+    const clamped = clampOptionsWidth(width);
+    const optionsPanel = document.getElementById('topics');
+    if (optionsPanel) {
+        optionsPanel.style.setProperty('--options-width', `${clamped}px`);
+    }
+    return clamped;
+}
+
+function initializeOptionsResizer() {
+    const optionsPanel = document.getElementById('topics');
+    const resizer = document.getElementById('optionsResizer');
+    if (!optionsPanel || !resizer) return;
+
+    let stored = null;
+    try {
+        stored = window.localStorage.getItem(OPTIONS_WIDTH_STORAGE_KEY);
+    } catch (_) { /* ignore */ }
+    applyOptionsWidth(stored != null ? stored : OPTIONS_WIDTH_DEFAULT);
+
+    let dragStartX = 0;
+    let dragStartWidth = 0;
+    let dragging = false;
+
+    function onMouseMove(event) {
+        if (!dragging) return;
+        const delta = event.clientX - dragStartX;
+        applyOptionsWidth(dragStartWidth + delta);
+    }
+
+    function onMouseUp() {
+        if (!dragging) return;
+        dragging = false;
+        resizer.classList.remove('is-dragging');
+        document.body.classList.remove('options-resizing');
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        const finalWidth = clampOptionsWidth(optionsPanel.getBoundingClientRect().width);
+        try {
+            window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(finalWidth));
+        } catch (_) { /* ignore */ }
+    }
+
+    resizer.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        dragging = true;
+        dragStartX = event.clientX;
+        dragStartWidth = optionsPanel.getBoundingClientRect().width;
+        resizer.classList.add('is-dragging');
+        document.body.classList.add('options-resizing');
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+
+    resizer.addEventListener('dblclick', () => {
+        applyOptionsWidth(OPTIONS_WIDTH_DEFAULT);
+        try {
+            window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(OPTIONS_WIDTH_DEFAULT));
+        } catch (_) { /* ignore */ }
+    });
+}
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'kss-sidebar-collapsed';
+
+function applySidebarCollapsedState(collapsed) {
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('sidebarCollapseToggle');
+    if (!sidebar || !toggle) return;
+    sidebar.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+    toggle.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    toggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+}
+
+function initializeSidebarCollapse() {
+    const toggle = document.getElementById('sidebarCollapseToggle');
+    if (!toggle) return;
+
+    let stored = null;
+    try {
+        stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+    } catch (_) { /* ignore */ }
+    applySidebarCollapsedState(stored === '1');
+
+    toggle.addEventListener('click', () => {
+        const sidebar = document.getElementById('sidebar');
+        if (!sidebar) return;
+        const next = !sidebar.classList.contains('collapsed');
+        applySidebarCollapsedState(next);
+        try {
+            window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
+        } catch (_) { /* ignore */ }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     document.querySelector('#custom-alert .custom-alert-close').addEventListener('click', closeAlert);
+    initializeOptionsResizer();
+    initializeSidebarCollapse();
 });

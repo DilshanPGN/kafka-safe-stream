@@ -7,25 +7,48 @@
       http-equiv="Content-Security-Policy"
       content="script-src 'self' 'unsafe-inline' 'unsafe-eval'"
     />
+    <link rel="stylesheet" href="theme-variables.css" />
     <link rel="stylesheet" href="setup.css" />
-    <title>Setup</title>
+    <title>Setup — Kafka Safe Stream</title>
   </head>
   <body>
     <div id="custom-alert" class="custom-alert">
       <div class="custom-alert-content">
-          <span class="custom-alert-close">&times;</span>
-          <h3 id="custom-alert-topic"></h3>
-          <p id="custom-alert-message"></p>
+        <button type="button" class="custom-alert-close" aria-label="Close">&times;</button>
+        <h3 id="custom-alert-topic"></h3>
+        <p id="custom-alert-message"></p>
       </div>
     </div>
-    <div class="container">
-      <div id="topics">
-        <h3>CONFIGURATION</h3>
-      </div>
-      <div class="content-group">
-        <textarea id="configText" placeholder="Enter Configuration"></textarea>
-        <p id="configPathText"></p>
-        <button id="saveConfig" disabled>Save & Close</button>
+    <div class="setup-app">
+      <header class="setup-header">
+        <h1 class="setup-title">Configuration</h1>
+        <p class="setup-subtitle">
+          Add environments (bootstrap brokers), test the connection, then pick topics to include in your saved list.
+          This does not create or delete topics on the cluster.
+        </p>
+        <p class="setup-steps">1. Brokers → 2. Test connection → 3. Pick topics to save</p>
+      </header>
+      <div class="setup-layout">
+        <aside class="setup-sidebar">
+          <button type="button" id="addEnvBtn" class="btn btn-secondary">+ Add environment</button>
+          <ul id="envList" class="env-list" aria-label="Environments"></ul>
+        </aside>
+        <main class="setup-main">
+          <div id="envPanel" class="env-panel"></div>
+          <details class="setup-advanced" id="advancedDetails">
+            <summary class="setup-advanced-summary">Advanced: edit JSON</summary>
+            <div class="setup-advanced-body">
+              <textarea id="configJsonText" class="setup-json-text" spellcheck="false" placeholder="{ }"></textarea>
+              <button type="button" id="applyJsonBtn" class="btn btn-secondary">Load from JSON</button>
+            </div>
+          </details>
+          <footer class="setup-footer">
+            <p id="configPathText" class="config-path"></p>
+            <div class="setup-footer-actions">
+              <button type="button" id="saveConfig" class="btn btn-primary">Save &amp; Close</button>
+            </div>
+          </footer>
+        </main>
       </div>
     </div>
     <script src="setup.js"></script>

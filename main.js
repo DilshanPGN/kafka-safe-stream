@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -8,6 +8,8 @@ const isDev = false;
 let mainWindow;
 let aboutWindow;
 let setupWindow;
+/** Last theme from main app when opening setup (File menu uses this if renderer did not pass). */
+let lastSetupTheme = 'dark';
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -79,21 +81,25 @@ function createAboutWindow() {
 }
 
 // About Window
-function createSetupWindow() {
-
+function createSetupWindow(explicitTheme) {
     if (setupWindow) {
         setupWindow.focus();
         return;
     }
 
+    const theme = explicitTheme === 'light' || explicitTheme === 'dark' ? explicitTheme : lastSetupTheme;
+
     setupWindow = new BrowserWindow({
-        width: 600,
-        height: 400,
-        title: 'Setup Configurations',
+        width: 960,
+        height: 720,
+        minWidth: 720,
+        minHeight: 520,
+        title: 'Setup — Kafka Safe Stream',
         autoHideMenuBar: true,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
+            additionalArguments: [`--kss-theme=${theme}`],
         },
         icon: path.join(__dirname, 'kss_logo.png'),
     });
@@ -102,17 +108,23 @@ function createSetupWindow() {
 
     setupWindow.on('closed', () => {
         setupWindow = null;
-        // Notify the renderer process that the About window is closed
-        mainWindow.webContents.send('setup-window-closed');
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('setup-window-closed');
+        }
     });
 }
 
 ipcMain.on('close-setup-window', () => {
-    setupWindow.close();
+    if (setupWindow && !setupWindow.isDestroyed()) {
+        setupWindow.close();
+    }
 });
 
-ipcMain.on('open-setup-window', () => {
-    createSetupWindow();
+ipcMain.on('open-setup-window', (_event, theme) => {
+    if (theme === 'light' || theme === 'dark') {
+        lastSetupTheme = theme;
+    }
+    createSetupWindow(theme === 'light' || theme === 'dark' ? theme : undefined);
 });
 
 ipcMain.on('config-saved', () => {
@@ -129,6 +141,22 @@ ipcMain.on('config-saved', () => {
     } catch (err) {
         console.error('Failed to forward config-updated:', err);
     }
+});
+
+ipcMain.handle('save-consumed-export', async (_event, { defaultPath, filters }) => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    if (!win) {
+        return { canceled: true, filePath: undefined };
+    }
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+        defaultPath: defaultPath || 'consumed-messages.json',
+        filters: filters && filters.length ? filters : [
+            { name: 'JSON', extensions: ['json'] },
+            { name: 'JSON Lines', extensions: ['jsonl', 'ndjson'] },
+            { name: 'CSV', extensions: ['csv'] },
+        ],
+    });
+    return { canceled, filePath };
 });
 
 // Menu template
@@ -148,7 +176,7 @@ const macMenu = [
         submenu: [
             {
                 label: 'Setup',
-                click: createSetupWindow,
+                click: () => createSetupWindow(),
             },
             {
                 label: 'Quit',
@@ -191,7 +219,7 @@ const winMenu = [
         submenu: [
             {
                 label: 'Setup',
-                click: createSetupWindow,
+                click: () => createSetupWindow(),
             },
             {
                 label: 'Quit',

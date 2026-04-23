@@ -1,0 +1,115 @@
+/* Matches main app CodeMirror + theme-variables for payload popup */
+html,
+body {
+    height: 100%;
+    margin: 0;
+}
+
+body {
+    box-sizing: border-box;
+    padding: 12px;
+    background: var(--color-bg);
+}
+
+#editor {
+    height: calc(100vh - 24px);
+    min-height: 200px;
+}
+
+.CodeMirror {
+    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+    width: 100%;
+    height: 100%;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+    font-size: clamp(14px, 0.35vw + 12px, 17px);
+    line-height: 1.6;
+}
+
+.CodeMirror-gutters {
+    background: var(--color-bg-muted);
+    border-right: 1px solid var(--color-border);
+}
+
+.CodeMirror-linenumber {
+    color: var(--color-text-subtle);
+}
+
+.CodeMirror-cursor {
+    border-left: 1px solid var(--color-accent);
+}
+
+.CodeMirror-lines {
+    padding: 10px 0;
+}
+
+.CodeMirror pre.CodeMirror-line,
+.CodeMirror pre.CodeMirror-line-like {
+    padding: 0 14px;
+}
+
+.CodeMirror-selected {
+    background: var(--cm-selection) !important;
+}
+
+.CodeMirror-focused .CodeMirror-selected {
+    background: var(--cm-selection) !important;
+}
+
+.CodeMirror span.cm-string,
+.CodeMirror span.cm-string-2 {
+    color: var(--cm-string);
+}
+
+.CodeMirror span.cm-number {
+    color: var(--cm-number);
+    font-weight: 600;
+}
+
+.CodeMirror span.cm-keyword,
+.CodeMirror span.cm-operator {
+    color: var(--cm-keyword);
+}
+
+.CodeMirror span.cm-atom {
+    color: var(--cm-atom);
+    font-weight: 600;
+}
+
+.CodeMirror span.cm-property {
+    color: var(--cm-property);
+    font-weight: 600;
+}
+
+.CodeMirror span.cm-variable,
+.CodeMirror span.cm-variable-2,
+.CodeMirror span.cm-variable-3,
+.CodeMirror span.cm-def {
+    color: var(--cm-variable);
+}
+
+.CodeMirror span.cm-comment {
+    color: var(--cm-comment);
+    font-style: italic;
+}
+
+.CodeMirror span.cm-meta {
+    color: var(--cm-meta);
+}
+
+.CodeMirror span.cm-bracket,
+.CodeMirror span.cm-punctuation {
+    color: var(--cm-bracket);
+}
+
+.CodeMirror-matchingbracket {
+    color: var(--cm-bracket) !important;
+    text-decoration: underline;
+    font-weight: 700;
+}
+
+.CodeMirror-nonmatchingbracket {
+    color: var(--color-danger) !important;
+}

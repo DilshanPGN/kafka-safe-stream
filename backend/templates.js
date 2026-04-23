@@ -39,7 +39,7 @@ function getTemplate(id) {
     return readAll().find((t) => t.id === id) || null;
 }
 
-function saveTemplate({ name, payload }) {
+function saveTemplate({ name, payload, format }) {
     if (!name || !name.trim()) {
         throw new Error('Template name is required');
     }
@@ -49,6 +49,7 @@ function saveTemplate({ name, payload }) {
         id: crypto.randomUUID(),
         name: name.trim(),
         payload: payload || '',
+        format: format && String(format).trim() ? String(format).trim() : 'json',
         createdAt: now,
         updatedAt: now,
     };
