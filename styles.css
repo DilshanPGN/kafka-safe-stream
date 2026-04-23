@@ -196,6 +196,12 @@ body[data-app-mode="basic"] .options-consumer-controls .options-row--basic-hide 
     display: none !important;
 }
 
+/* Consumer lag: offset reset/delete are advanced-only */
+body[data-app-mode="basic"] #consumerLagContainer .lag-col-actions,
+body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
+    display: none !important;
+}
+
 .consumer-fetch-status {
     display: none;
     align-items: flex-start;
@@ -762,6 +768,39 @@ body.options-resizing * {
     color: var(--color-accent);
 }
 
+.consumer-messages-table .consumer-msg-value-cell--openable {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+    cursor: pointer;
+    max-width: 420px;
+}
+
+.consumer-messages-table .consumer-msg-value-cell--openable:hover .consumer-msg-value-preview {
+    text-decoration: underline;
+}
+
+.consumer-messages-table .consumer-msg-value-preview {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.consumer-messages-table .consumer-view-payload-btn {
+    flex-shrink: 0;
+    padding: 2px 10px;
+    min-height: 26px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0;
+    box-shadow: none;
+}
+
+.consumer-messages-table .consumer-view-payload-btn:hover {
+    transform: none;
+}
+
 .consumer-messages-table .consumer-msg-empty {
     text-align: center;
     color: var(--color-text-subtle);
@@ -1256,6 +1295,49 @@ body.options-resizing * {
     font-size: 12px;
     color: var(--color-text-muted);
     font-weight: 600;
+}
+
+/* Table view: same grouping shell as “Start from” (.control-label + .radio-group); checked row stands out */
+.options-consumer-controls .radio-group label.consumer-table-view-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-weight: 700;
+    font-size: 12px;
+    cursor: pointer;
+    justify-content: flex-start;
+    transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+
+.options-consumer-controls .radio-group label.consumer-table-view-option:hover {
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-bg-soft) 80%, transparent);
+}
+
+.options-consumer-controls .radio-group label.consumer-table-view-option:has(#consumerTableViewToggle:checked) {
+    border-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 18%, var(--color-bg-soft));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 45%, transparent);
+    color: var(--color-text);
+}
+
+.options-consumer-controls .radio-group label.consumer-table-view-option:has(#consumerTableViewToggle:checked) .consumer-table-view-option__text {
+    color: var(--color-heading);
+}
+
+.options-consumer-controls .radio-group label.consumer-table-view-option #consumerTableViewToggle {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    accent-color: var(--color-accent);
+    cursor: pointer;
 }
 
 .message-count {

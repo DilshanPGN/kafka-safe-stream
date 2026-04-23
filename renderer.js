@@ -106,6 +106,9 @@ let lagOverviewData = null;
 let lagResetInFlight = false;
 /** When true, consumed messages render as a table instead of CodeMirror. */
 let consumerTableView = false;
+/** Last rows rendered in the consumer table (for “View payload” window). */
+let lastConsumerTableFilteredSnapshot = [];
+let consumerTablePayloadClickBound = false;
 let consumerBlurIdleTimerId = null;
 let consumerIdleCountdownIntervalId = null;
 let consumerIdleModalActive = false;
@@ -710,6 +713,106 @@ function getFilteredConsumedMessages() {
     return filtered;
 }
 
+function formatPayloadForViewer(raw, formatId) {
+    const id = PAYLOAD_FORMATS[formatId] ? formatId : DEFAULT_FORMAT;
+    const text = raw != null ? String(raw) : '';
+    if (id === 'text') return text;
+    try {
+        return formatPayload(id, text);
+    } catch (_) {
+        return text;
+    }
+}
+
+function openConsumerMessagePayloadWindow(msg) {
+    if (!msg) return;
+    const raw = msg.value != null ? String(msg.value) : '';
+    // Do not pass `noopener` here: with noopener, window.open() returns null (by spec), so we
+    // could not call document.write. Real popup blockers still return null with no features fix.
+    const w = window.open('', '_blank', 'width=920,height=720,scrollbars=yes');
+    if (!w) {
+        showAlert('View payload', 'Could not open a new window (popup blocker or OS restriction).');
+        return;
+    }
+    const theme = document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    const fmtId = PAYLOAD_FORMATS[consumerFormat] ? consumerFormat : DEFAULT_FORMAT;
+    const fmtLabel = (PAYLOAD_FORMATS[fmtId] || PAYLOAD_FORMATS[DEFAULT_FORMAT]).label;
+    const display = formatPayloadForViewer(raw, fmtId);
+    const escaped = escapeHtml(display);
+    let themeHref = '';
+    try {
+        themeHref = new URL('theme-variables.css', window.location.href).href;
+    } catch (_) {
+        themeHref = 'theme-variables.css';
+    }
+    const title = `Message — ${fmtLabel}`;
+    w.document.write(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
+<link rel="stylesheet" href="${escapeHtml(themeHref)}">
+<style>
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    box-sizing: border-box;
+    padding: 16px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 16px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+    box-shadow: var(--shadow-sm);
+  }
+</style></head><body data-theme="${theme}"><pre>${escaped}</pre></body></html>`);
+    w.document.close();
+}
+
+function wireConsumerTablePayloadViewer() {
+    const wrap = document.getElementById('consumedMessagesTableWrap');
+    if (!wrap || consumerTablePayloadClickBound) return;
+    consumerTablePayloadClickBound = true;
+    wrap.addEventListener('click', (e) => {
+        const btn = e.target.closest('.consumer-view-payload-btn');
+        const valueCell = e.target.closest('.consumer-msg-value-cell--openable');
+        if (!btn && !valueCell) return;
+        const tr = (btn || valueCell).closest('tr');
+        if (!tr || tr.querySelector('.consumer-msg-empty')) return;
+        const idx = parseInt(tr.getAttribute('data-msg-index') || '', 10);
+        if (!Number.isFinite(idx)) return;
+        const msg = lastConsumerTableFilteredSnapshot[idx];
+        if (!msg) return;
+        const val = msg.value != null ? String(msg.value) : '';
+        if (!val) return;
+        if (btn) e.preventDefault();
+        openConsumerMessagePayloadWindow(msg);
+    });
+
+    wrap.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const valueCell = e.target.closest('.consumer-msg-value-cell--openable');
+        if (!valueCell) return;
+        e.preventDefault();
+        const tr = valueCell.closest('tr');
+        if (!tr) return;
+        const idx = parseInt(tr.getAttribute('data-msg-index') || '', 10);
+        if (!Number.isFinite(idx)) return;
+        const msg = lastConsumerTableFilteredSnapshot[idx];
+        if (!msg) return;
+        const val = msg.value != null ? String(msg.value) : '';
+        if (!val) return;
+        openConsumerMessagePayloadWindow(msg);
+    });
+}
+
 function applyConsumerSurfaceVisibility() {
     const cmHost = document.getElementById('consumedMessages');
     const tableWrap = document.getElementById('consumedMessagesTableWrap');
@@ -733,6 +836,8 @@ function renderConsumerTable(filtered) {
     const tbody = document.getElementById('consumedMessagesTableBody');
     if (!thead || !tbody) return;
 
+    lastConsumerTableFilteredSnapshot = filtered.slice();
+
     const headerKeys = collectHeaderKeysFromMessages(filtered);
     const fixedTh = ['Par', 'Offset', 'Timestamp', 'Key', 'Value'].map((label) => `<th>${escapeHtml(label)}</th>`).join('');
     const dynTh = headerKeys.map((k) => `<th>${escapeHtml(k)}</th>`).join('');
@@ -744,33 +849,49 @@ function renderConsumerTable(filtered) {
         return;
     }
 
-    const maxCell = 400;
-    const trunc = (s) => {
+    const maxCellOther = 200;
+    const valuePreviewMax = 120;
+    const trunc = (s, maxLen) => {
         const t = s == null ? '' : String(s);
-        if (t.length <= maxCell) return { html: escapeHtml(t), title: '' };
-        return { html: `${escapeHtml(t.slice(0, maxCell))}…`, title: escapeHtml(t) };
+        if (t.length <= maxLen) return { html: escapeHtml(t), title: '', truncated: false };
+        return {
+            html: `${escapeHtml(t.slice(0, maxLen))}…`,
+            title: escapeHtml(t),
+            truncated: true,
+        };
     };
 
-    tbody.innerHTML = filtered.map((m) => {
+    tbody.innerHTML = filtered.map((m, rowIdx) => {
         const h = normalizeHeaders(m.headers || {});
         const ts = formatTimestampDisplay(m.timestamp);
-        const keyDisp = trunc(m.key != null && m.key !== '' ? String(m.key) : '—');
-        const valDisp = trunc(m.value != null ? String(m.value) : '');
+        const keyDisp = trunc(m.key != null && m.key !== '' ? String(m.key) : '—', maxCellOther);
+        const valStr = m.value != null ? String(m.value) : '';
+        const valDisp = trunc(valStr, valuePreviewMax);
         const keyTitle = keyDisp.title ? ` title="${keyDisp.title}"` : '';
-        const valTitle = valDisp.title ? ` title="${valDisp.title}"` : '';
+        const valueHasContent = valStr.length > 0;
+        const valueTitleAttr = valDisp.title
+            ? ` title="${valDisp.title}"`
+            : (valueHasContent ? ' title="Open full payload in new window (click or Enter)"' : '');
+        const valueCellAttrs = valueHasContent
+            ? ` class="consumer-msg-value-cell consumer-msg-value-cell--openable" tabindex="0" role="button" aria-label="Open full payload in new window"${valueTitleAttr}`
+            : ' class="consumer-msg-value-cell"';
+        const viewBtn = valueHasContent && valDisp.truncated
+            ? '<button type="button" class="consumer-view-payload-btn btn-secondary" title="Open full payload in new window">View</button>'
+            : '';
+        const valueInner = `<span class="consumer-msg-value-preview">${valDisp.html || '—'}</span>${viewBtn}`;
         const fixedCells = `
             <td>${escapeHtml(String(m.partition))}</td>
             <td>${escapeHtml(String(m.offset))}</td>
             <td class="consumer-msg-ts-cell">${escapeHtml(ts)}</td>
             <td${keyTitle}>${keyDisp.html}</td>
-            <td class="consumer-msg-value-cell"${valTitle}>${valDisp.html}</td>`;
+            <td${valueCellAttrs}>${valueInner}</td>`;
         const dynCells = headerKeys.map((hk) => {
             const raw = h[hk] != null && h[hk] !== '' ? String(h[hk]) : '—';
-            const d = trunc(raw === '—' ? '—' : raw);
+            const d = trunc(raw === '—' ? '—' : raw, maxCellOther);
             const tit = d.title ? ` title="${d.title}"` : '';
             return `<td${tit}>${d.html}</td>`;
         }).join('');
-        return `<tr>${fixedCells}${dynCells}</tr>`;
+        return `<tr data-msg-index="${rowIdx}">${fixedCells}${dynCells}</tr>`;
     }).join('');
 
     const wrap = document.getElementById('consumedMessagesTableWrap');
@@ -1562,7 +1683,7 @@ function renderLagOverviewResult(data) {
                 <td>${committedCell}</td>
                 <td>${escapeHtml(String(pr.logEnd))}</td>
                 <td>${lagCell}</td>
-                <td class="lag-action-cell">
+                <td class="lag-action-cell lag-col-actions">
                     <div class="lag-action-buttons">
                     <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
                     <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
@@ -2037,6 +2158,8 @@ function wireConsumerControls() {
             });
         });
     }
+
+    wireConsumerTablePayloadViewer();
 
     const startModeRadios = document.querySelectorAll('input[name="startMode"]');
     const offsetRow = document.getElementById('offsetRow');

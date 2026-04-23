@@ -170,12 +170,6 @@
                                   </select>
                               </label>
                           </div>
-                          <div class="control-row">
-                              <label class="control-checkbox">
-                                  <input type="checkbox" id="consumerTableViewToggle" />
-                                  Table view (metadata columns)
-                              </label>
-                          </div>
                           <div class="control-row options-row--basic-hide">
                               <span class="control-label">Start from</span>
                               <div class="radio-group" id="startModeGroup">
@@ -208,6 +202,15 @@
                                   <span>Consumer group</span>
                                   <input type="text" id="consumerGroupInput" placeholder="kafka-safe-stream-group" />
                               </label>
+                          </div>
+                          <div class="control-row">
+                              <span class="control-label" id="consumerTableViewGroupLabel">Message view</span>
+                              <div class="radio-group" role="group" aria-labelledby="consumerTableViewGroupLabel">
+                                  <label class="control-checkbox consumer-table-view-option" for="consumerTableViewToggle">
+                                      <input type="checkbox" id="consumerTableViewToggle" />
+                                      <span class="consumer-table-view-option__text">Table view (metadata columns)</span>
+                                  </label>
+                              </div>
                           </div>
                       </div>
                   </div>
@@ -284,8 +287,8 @@
                       <label class="topic-label" for="lagTopicSelect">Topic</label>
                       <select id="lagTopicSelect"></select>
                       <button id="lagLoadButton" type="button" class="btn-primary">Load</button>
-                      <button id="lagResetAllButton" type="button" class="btn-secondary lag-reset-all-button" disabled>Reset all shown groups to latest</button>
-                      <button id="lagDeleteAllButton" type="button" class="btn-danger lag-delete-all-button" disabled>Delete all listed groups</button>
+                      <button id="lagResetAllButton" type="button" class="btn-secondary lag-reset-all-button lag-toolbar-advanced" disabled>Reset all shown groups to latest</button>
+                      <button id="lagDeleteAllButton" type="button" class="btn-danger lag-delete-all-button lag-toolbar-advanced" disabled>Delete all listed groups</button>
                   </div>
                   <div id="lagStatus" class="lag-status"></div>
                   <div id="lagTableWrapper" class="topics-table-wrapper">
@@ -300,7 +303,7 @@
                                   <th>Committed</th>
                                   <th>Log end</th>
                                   <th>Lag</th>
-                                  <th>Actions</th>
+                                  <th class="lag-col-actions">Actions</th>
                               </tr>
                           </thead>
                           <tbody id="lagTableBody"></tbody>
