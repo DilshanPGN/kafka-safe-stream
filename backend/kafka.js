@@ -1,4 +1,7 @@
 const { Kafka, Partitioners } = require('kafkajs');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 let consumer;
 let consumerStopping = false;
@@ -415,6 +418,100 @@ async function getConsumerLagOverview(kafka, topicName) {
     }
 }
 
+/**
+ * Reset committed offsets for a consumer group on a topic to latest.
+ * This clears lag relative to current log-end offsets.
+ */
+async function resetConsumerGroupOffsetsToLatest(kafka, options) {
+    const groupId = options && String(options.groupId || '').trim();
+    const topic = options && String(options.topic || '').trim();
+    if (!groupId) throw new Error('groupId is required');
+    if (!topic) throw new Error('topic is required');
+
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+        const topicOffsets = await admin.fetchTopicOffsets(topic);
+        const partitions = (topicOffsets || [])
+            .map((row) => ({
+                partition: Number(row.partition),
+                offset: String(row.high !== undefined ? row.high : row.offset),
+            }))
+            .filter((row) => Number.isFinite(row.partition) && row.partition >= 0);
+        if (!partitions.length) {
+            throw new Error(`No partition offsets found for topic "${topic}"`);
+        }
+
+        await admin.setOffsets({
+            groupId,
+            topic,
+            partitions,
+        });
+
+        return {
+            ok: true,
+            groupId,
+            topic,
+            partitionCount: partitions.length,
+            partitions,
+        };
+    } finally {
+        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+    }
+}
+
+async function resetConsumerGroupsOffsetsToLatest(kafka, options) {
+    const topic = options && String(options.topic || '').trim();
+    const groupIds = [...new Set((options && options.groupIds ? options.groupIds : [])
+        .map((g) => String(g || '').trim())
+        .filter(Boolean))];
+    if (!topic) throw new Error('topic is required');
+    if (!groupIds.length) throw new Error('At least one groupId is required');
+
+    const results = [];
+    for (const groupId of groupIds) {
+        try {
+            const one = await resetConsumerGroupOffsetsToLatest(kafka, { groupId, topic });
+            results.push({
+                ok: true,
+                groupId,
+                topic,
+                partitionCount: one.partitionCount,
+            });
+        } catch (err) {
+            results.push({
+                ok: false,
+                groupId,
+                topic,
+                error: err.message || String(err),
+            });
+        }
+    }
+
+    const successCount = results.filter((r) => r.ok).length;
+    const failureCount = results.length - successCount;
+    return {
+        topic,
+        total: results.length,
+        successCount,
+        failureCount,
+        results,
+    };
+}
+
+function appendOffsetResetAudit(event) {
+    const dir = path.join(os.homedir(), '.kss');
+    const file = path.join(dir, 'audit-offset-resets.log');
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+    const payload = {
+        timestamp: new Date().toISOString(),
+        ...event,
+    };
+    fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, 'utf8');
+}
+
 async function consumeMessages(kafka, options, onMessage, onDone) {
     const {
         topic,
@@ -529,5 +626,8 @@ module.exports = {
     getTopicsAndPartitions,
     getTopicOffsets,
     getConsumerLagOverview,
+    resetConsumerGroupOffsetsToLatest,
+    resetConsumerGroupsOffsetsToLatest,
+    appendOffsetResetAudit,
     getClusterMetadata,
 };

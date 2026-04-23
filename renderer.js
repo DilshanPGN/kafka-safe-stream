@@ -7,6 +7,9 @@ const {
     getTopicsAndPartitions,
     getTopicOffsets,
     getConsumerLagOverview,
+    resetConsumerGroupOffsetsToLatest,
+    resetConsumerGroupsOffsetsToLatest,
+    appendOffsetResetAudit,
     getClusterMetadata,
 } = require('./backend/kafka');
 const templatesApi = require('./backend/templates');
@@ -98,6 +101,8 @@ let rendererInitialized = false;
 let pendingConfigUpdate = null;
 window.refreshIntervalId = null;
 let lagTopic = '';
+let lagOverviewData = null;
+let lagResetInFlight = false;
 let consumerBlurIdleTimerId = null;
 let consumerIdleCountdownIntervalId = null;
 let consumerIdleModalActive = false;
@@ -993,12 +998,119 @@ function clearLagOverviewUI(message) {
     const body = document.getElementById('lagTableBody');
     const empty = document.getElementById('lagEmptyState');
     const status = document.getElementById('lagStatus');
+    lagOverviewData = null;
     if (body) body.innerHTML = '';
     if (empty) {
         empty.textContent = message || 'Select a topic and click Load.';
         empty.style.display = 'block';
     }
     if (status) status.textContent = '';
+    setLagResetControlsState();
+}
+
+function setLagResetControlsState() {
+    const bulkBtn = document.getElementById('lagResetAllButton');
+    if (bulkBtn) {
+        const hasGroups = !!(lagOverviewData && Array.isArray(lagOverviewData.groups) && lagOverviewData.groups.length);
+        bulkBtn.disabled = lagResetInFlight || !hasGroups;
+    }
+    document.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.disabled = lagResetInFlight;
+    });
+}
+
+async function confirmLagReset(scope, topic, groupIds) {
+    const scopeLabel = scope === 'bulk' ? 'all shown groups' : `group "${groupIds[0]}"`;
+    const confirmed = await showConfirm(
+        'Reset offsets to latest?',
+        `You are about to reset committed offsets for ${scopeLabel} on topic "${topic}". This can immediately clear lag. Active consumers may commit different offsets again after this action. Continue?`
+    );
+    if (!confirmed) return null;
+
+    const reasonRaw = await showPrompt(
+        'Offset reset reason',
+        'Enter a reason for auditing this action.',
+        ''
+    );
+    if (reasonRaw === null) return null;
+    const reason = String(reasonRaw || '').trim();
+    if (!reason) {
+        showAlert('Offset reset', 'Reason is required.');
+        return null;
+    }
+    return reason;
+}
+
+async function handleLagReset(scope, groupIds) {
+    const topic = lagTopic;
+    if (!topic) {
+        showAlert('Offset reset', 'Select a topic first.');
+        return;
+    }
+    const targets = [...new Set((groupIds || []).filter(Boolean))];
+    if (!targets.length) {
+        showAlert('Offset reset', 'No consumer groups available to reset.');
+        return;
+    }
+    const reason = await confirmLagReset(scope, topic, targets);
+    if (reason === null) return;
+
+    const osUsername = (() => {
+        try {
+            return os.userInfo().username || process.env.USERNAME || process.env.USER || 'unknown';
+        } catch (_) {
+            return process.env.USERNAME || process.env.USER || 'unknown';
+        }
+    })();
+
+    lagResetInFlight = true;
+    setLagResetControlsState();
+    showLoading();
+    try {
+        const kafka = await getKafkaClient();
+        let outcome = 'success';
+        let details;
+
+        if (scope === 'bulk') {
+            details = await resetConsumerGroupsOffsetsToLatest(kafka, { topic, groupIds: targets });
+            if (details.failureCount > 0 && details.successCount > 0) outcome = 'partial';
+            if (details.failureCount > 0 && details.successCount === 0) outcome = 'failed';
+            if (outcome === 'success') {
+                showAlert('Offset reset', `Reset offsets to latest for ${details.successCount} group(s) on "${topic}".`);
+            } else if (outcome === 'partial') {
+                showAlert('Offset reset (partial)', `Reset succeeded for ${details.successCount} group(s), failed for ${details.failureCount}.`);
+            } else {
+                const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
+                showAlert('Offset reset failed', firstErr);
+            }
+        } else {
+            details = await resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId: targets[0] });
+            showAlert('Offset reset', `Reset offsets to latest for "${targets[0]}" on "${topic}".`);
+        }
+
+        try {
+            appendOffsetResetAudit({
+                scope,
+                topic,
+                groupIds: targets,
+                operatorReason: reason,
+                osUsername,
+                activeEnv,
+                outcome,
+                details,
+            });
+        } catch (auditErr) {
+            console.warn('Failed to append offset reset audit log:', auditErr);
+        }
+
+        await loadConsumerLagOverview();
+    } catch (err) {
+        showAlert('Offset reset failed', err.message || String(err));
+    } finally {
+        lagResetInFlight = false;
+        hideLoading();
+        setLagResetControlsState();
+    }
 }
 
 function populateLagTopicSelect() {
@@ -1032,6 +1144,7 @@ function renderLagOverviewResult(data) {
     const empty = document.getElementById('lagEmptyState');
     const status = document.getElementById('lagStatus');
     if (!body || !empty || !status) return;
+    lagOverviewData = data;
 
     status.textContent = `Scanned ${data.scannedGroupCount} groups — ${data.matchedGroupCount} with commits on "${data.topic}".`;
 
@@ -1039,6 +1152,7 @@ function renderLagOverviewResult(data) {
         body.innerHTML = '';
         empty.textContent = 'No consumer groups have committed offsets for this topic yet.';
         empty.style.display = 'block';
+        setLagResetControlsState();
         return;
     }
 
@@ -1064,10 +1178,26 @@ function renderLagOverviewResult(data) {
                 <td>${committedCell}</td>
                 <td>${escapeHtml(String(pr.logEnd))}</td>
                 <td>${lagCell}</td>
+                <td class="lag-action-cell">
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
+                </td>
             `;
             body.appendChild(tr);
         }
     }
+    body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-reset-group') || '');
+            } catch (_) {
+                return;
+            }
+            if (!groupId) return;
+            handleLagReset('single', [groupId]);
+        });
+    });
+    setLagResetControlsState();
 }
 
 async function loadConsumerLagOverview() {
@@ -1087,6 +1217,7 @@ async function loadConsumerLagOverview() {
         clearLagOverviewUI();
     } finally {
         hideLoading();
+        setLagResetControlsState();
     }
 }
 
@@ -1227,6 +1358,16 @@ function wireClusterOverviewControls() {
 function wireLagOverviewControls() {
     const btn = document.getElementById('lagLoadButton');
     if (btn) btn.addEventListener('click', () => loadConsumerLagOverview());
+    const resetAllBtn = document.getElementById('lagResetAllButton');
+    if (resetAllBtn) {
+        resetAllBtn.addEventListener('click', () => {
+            const ids = (lagOverviewData && Array.isArray(lagOverviewData.groups))
+                ? lagOverviewData.groups.map((g) => g.groupId).filter(Boolean)
+                : [];
+            handleLagReset('bulk', ids);
+        });
+    }
+    setLagResetControlsState();
 }
 
 function ensureTopicInList(topicName) {

@@ -1216,6 +1216,10 @@ body.options-resizing * {
     margin-bottom: 10px;
 }
 
+.lag-reset-all-button {
+    min-height: 34px;
+}
+
 .lag-toolbar #lagTopicSelect {
     min-width: 220px;
     height: 34px;
@@ -1241,6 +1245,17 @@ body.options-resizing * {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.lag-action-cell {
+    white-space: nowrap;
+    width: 160px;
+}
+
+.lag-reset-btn {
+    min-height: 28px;
+    padding: 4px 10px;
+    font-size: 12px;
 }
 
 #clusterInfoContainer {
