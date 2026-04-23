@@ -1,75 +1,9 @@
+@import url('theme-variables.css');
+
 *,
 *::before,
 *::after {
     box-sizing: border-box;
-}
-
-:root {
-    --color-bg: #f4f6fb;
-    --color-bg-elev: #ffffff;
-    --color-bg-soft: #f8fafe;
-    --color-bg-muted: #eef2f9;
-    --color-border: #dde4ef;
-    --color-border-strong: #c8d2e2;
-    --color-text: #0f172a;
-    --color-text-muted: #5b6b85;
-    --color-text-subtle: #8392ab;
-    --color-heading: #0b1736;
-    --color-accent: #4f46e5;
-    --color-accent-strong: #4338ca;
-    --color-accent-soft: #eef0ff;
-    --color-accent-text: #ffffff;
-    --color-success: #10b981;
-    --color-danger: #ef4444;
-    --color-warning: #f59e0b;
-    --color-info: #0ea5e9;
-    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 1px rgba(15, 23, 42, 0.03);
-    --shadow-md: 0 4px 14px rgba(15, 23, 42, 0.06);
-    --shadow-glow: 0 0 0 1px rgba(79, 70, 229, 0.18);
-    --radius-sm: 8px;
-    --radius-md: 12px;
-    --radius-lg: 14px;
-    --transition: 160ms ease;
-    --cm-string: #0f7d4d;
-    --cm-number: #a91b8e;
-    --cm-keyword: #1d4ed8;
-    --cm-atom: #a91b8e;
-    --cm-property: #0b5394;
-    --cm-variable: #0f172a;
-    --cm-comment: #6b7280;
-    --cm-meta: #6b7280;
-    --cm-bracket: #0f172a;
-    --cm-selection: rgba(79, 70, 229, 0.18);
-}
-
-body[data-theme="dark"] {
-    --color-bg: #070b18;
-    --color-bg-elev: #0f1729;
-    --color-bg-soft: #131c33;
-    --color-bg-muted: #1a2440;
-    --color-border: #1f2a44;
-    --color-border-strong: #2c3a5c;
-    --color-text: #e6ecf7;
-    --color-text-muted: #8a99b8;
-    --color-text-subtle: #5c6c8a;
-    --color-heading: #f1f5fc;
-    --color-accent: #7c8bff;
-    --color-accent-strong: #93a0ff;
-    --color-accent-soft: rgba(124, 139, 255, 0.14);
-    --color-accent-text: #0a1024;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55);
-    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
-    --shadow-glow: 0 0 0 1px rgba(124, 139, 255, 0.35);
-    --cm-string: #a6e3a1;
-    --cm-number: #f5c2e7;
-    --cm-keyword: #89b4fa;
-    --cm-atom: #cba6f7;
-    --cm-property: #74c7ec;
-    --cm-variable: #cdd6f4;
-    --cm-comment: #6c7086;
-    --cm-meta: #9399b2;
-    --cm-bracket: #cdd6f4;
-    --cm-selection: rgba(124, 139, 255, 0.28);
 }
 
 body {

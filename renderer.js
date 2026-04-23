@@ -401,7 +401,7 @@ async function loadConfig() {
             console.error('Error reading or parsing the config file:', error);
             hideLoading();
             closeAlert();
-            ipcRenderer.send('open-setup-window');
+            ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
             await new Promise((resolve) => {
                 ipcRenderer.once('setup-window-closed', resolve);
             });
@@ -410,7 +410,7 @@ async function loadConfig() {
     } else {
         hideLoading();
         closeAlert();
-        ipcRenderer.send('open-setup-window');
+        ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
         await new Promise((resolve) => {
             ipcRenderer.once('setup-window-closed', resolve);
         });
@@ -1591,7 +1591,7 @@ function wireSetupButton() {
     const setupBtn = document.getElementById('setupButton');
     if (setupBtn) {
         setupBtn.addEventListener('click', () => {
-            ipcRenderer.send('open-setup-window');
+            ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
         });
     }
 }

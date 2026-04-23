@@ -10,6 +10,51 @@ async function createKafkaClient(brokers) {
     });
 }
 
+/**
+ * Parse broker textarea / comma-separated string into host:port strings for KafkaJS.
+ * @param {string|string[]} raw
+ * @returns {string[]}
+ */
+function brokerListFromInput(raw) {
+    const text = Array.isArray(raw) ? raw.join('\n') : String(raw || '');
+    const parts = text.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+    return parts.map((p) => {
+        const { host, port } = parseConfiguredBroker(p);
+        return `${host}:${port}`;
+    });
+}
+
+/**
+ * Quick connectivity check + topic names (no partition metadata).
+ * @param {string|string[]} brokersInput
+ * @returns {Promise<{ ok: true, clusterId: string, controller: number|null, brokerCount: number, topicNames: string[] }|{ ok: false, error: string }>}
+ */
+async function probeClusterConnection(brokersInput) {
+    const brokers = brokerListFromInput(brokersInput);
+    if (!brokers.length) {
+        return { ok: false, error: 'Enter at least one broker (e.g. localhost:9092).' };
+    }
+    const kafka = await createKafkaClient(brokers);
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+        const described = await admin.describeCluster();
+        const topicNames = await admin.listTopics();
+        const filtered = topicNames.filter((t) => !t.startsWith('__')).sort((a, b) => a.localeCompare(b));
+        return {
+            ok: true,
+            clusterId: described.clusterId || '',
+            controller: described.controller != null ? described.controller : null,
+            brokerCount: (described.brokers || []).length,
+            topicNames: filtered,
+        };
+    } catch (err) {
+        return { ok: false, error: err.message || String(err) };
+    } finally {
+        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+    }
+}
+
 async function produceMessage(kafka, topic, message, key) {
     const producer = kafka.producer({
         createPartitioner: Partitioners.LegacyPartitioner
@@ -476,6 +521,8 @@ async function stopConsuming() {
 
 module.exports = {
     createKafkaClient,
+    brokerListFromInput,
+    probeClusterConnection,
     produceMessage,
     consumeMessages,
     stopConsuming,
