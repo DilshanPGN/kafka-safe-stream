@@ -16,31 +16,44 @@ const fs = require('fs');
 const os = require('os');
 const Ajv = require('ajv');
 
+const TAB_ICONS = {
+    producer: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M22 2 11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 2 15 22l-4-9-9-4 20-7Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    consumer: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 14v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 15V3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    topicsBrowser: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4" cy="6" r="1" fill="currentColor"/><circle cx="4" cy="12" r="1" fill="currentColor"/><circle cx="4" cy="18" r="1" fill="currentColor"/></svg>',
+    consumerLag: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 12a9 9 0 1 1 18 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 12 16 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>',
+    clusterInfo: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="3" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="3" y="15" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="2"/><circle cx="7" cy="6" r="1" fill="currentColor"/><circle cx="7" cy="18" r="1" fill="currentColor"/></svg>',
+};
+
 const method = {
     producer: {
         id: 'producer',
-        label: 'Produce message',
+        label: 'Produce',
         containerId: 'producerContainer',
+        icon: TAB_ICONS.producer,
     },
     consumer: {
         id: 'consumer',
-        label: 'Consume message',
+        label: 'Consume',
         containerId: 'consumerContainer',
+        icon: TAB_ICONS.consumer,
     },
     topicsBrowser: {
         id: 'topicsBrowser',
-        label: 'Topics & Partitions',
+        label: 'Topics',
         containerId: 'topicsBrowserContainer',
+        icon: TAB_ICONS.topicsBrowser,
     },
     consumerLag: {
         id: 'consumerLag',
         label: 'Consumer lag',
         containerId: 'consumerLagContainer',
+        icon: TAB_ICONS.consumerLag,
     },
     clusterInfo: {
         id: 'clusterInfo',
-        label: 'Cluster Metadata',
+        label: 'Cluster',
         containerId: 'clusterInfoContainer',
+        icon: TAB_ICONS.clusterInfo,
     },
 };
 
@@ -329,6 +342,7 @@ function initializeEditor() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
+        mode: { name: 'javascript', json: true },
         theme: 'default',
         placeholder: 'Enter a JSON payload...',
     });
@@ -350,6 +364,7 @@ function initializeConsumer() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
+        mode: { name: 'javascript', json: true },
         theme: 'default',
         placeholder: 'Consumed messages will display here...',
     });
@@ -1482,6 +1497,14 @@ const buildMethodTab = (methodTabContainer, m) => {
     tab.type = 'button';
     tab.id = m.id;
     tab.classList.add('tab');
+    tab.title = m.label;
+    if (m.icon) {
+        const icon = document.createElement('span');
+        icon.classList.add('tab-icon');
+        icon.setAttribute('aria-hidden', 'true');
+        icon.innerHTML = m.icon;
+        tab.appendChild(icon);
+    }
     const label = document.createElement('span');
     label.classList.add('tab-label');
     label.textContent = m.label;
@@ -1613,7 +1636,41 @@ function initializeOptionsResizer() {
     });
 }
 
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'kss-sidebar-collapsed';
+
+function applySidebarCollapsedState(collapsed) {
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('sidebarCollapseToggle');
+    if (!sidebar || !toggle) return;
+    sidebar.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+    toggle.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    toggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+}
+
+function initializeSidebarCollapse() {
+    const toggle = document.getElementById('sidebarCollapseToggle');
+    if (!toggle) return;
+
+    let stored = null;
+    try {
+        stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+    } catch (_) { /* ignore */ }
+    applySidebarCollapsedState(stored === '1');
+
+    toggle.addEventListener('click', () => {
+        const sidebar = document.getElementById('sidebar');
+        if (!sidebar) return;
+        const next = !sidebar.classList.contains('collapsed');
+        applySidebarCollapsedState(next);
+        try {
+            window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
+        } catch (_) { /* ignore */ }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     document.querySelector('#custom-alert .custom-alert-close').addEventListener('click', closeAlert);
     initializeOptionsResizer();
+    initializeSidebarCollapse();
 });

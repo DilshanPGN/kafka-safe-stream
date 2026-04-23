@@ -12,7 +12,6 @@
       content="default-src 'self'; script-src 'self' 'unsafe-eval'"
     />
     <link rel="stylesheet" href='codemirror/codemirror.css' rel='stylesheet'>
-    <link rel="stylesheet" href="codemirror/dracula.min.css">
     <title>Kafka Safe Stream</title>
     <link rel="stylesheet" href="styles.css">
     <script src="./renderer.js"></script>
@@ -59,7 +58,14 @@
   </div>
   <div id="container">
       <aside id="sidebar">
-          <div class="brand">KSS</div>
+          <div class="sidebar-header">
+              <div class="brand">KSS</div>
+              <button id="sidebarCollapseToggle" class="sidebar-collapse-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar" aria-pressed="false">
+                  <svg class="sidebar-collapse-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                      <path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+              </button>
+          </div>
           <div id="tabs"></div>
       </aside>
       <div id="main">
