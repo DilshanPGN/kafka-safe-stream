@@ -75,6 +75,9 @@ let rendererInitialized = false;
 let pendingConfigUpdate = null;
 window.refreshIntervalId = null;
 let lagTopic = '';
+let consumerBlurIdleTimerId = null;
+let consumerIdleCountdownIntervalId = null;
+let consumerIdleModalActive = false;
 
 function loadPreferences() {
     try {
@@ -94,6 +97,26 @@ function savePreferences(prefs) {
     } catch (err) {
         console.warn('Failed to persist preferences', err);
     }
+}
+
+/**
+ * Consumer background-idle prompt. Stored in preferences.json (~/.kss/preferences.json).
+ * consumerIdle.blurUnfocusedMinutes — unfocused time before "still there?" (default 60 = 1 hour).
+ * consumerIdle.promptResponseMinutes — countdown before auto-stop if no confirmation (default 3).
+ */
+function getConsumerIdlePrefs() {
+    const prefs = loadPreferences();
+    const raw = prefs.consumerIdle || {};
+    let blurMin = Number(raw.blurUnfocusedMinutes);
+    let responseMin = Number(raw.promptResponseMinutes);
+    if (!Number.isFinite(blurMin) || blurMin <= 0) blurMin = 60;
+    if (!Number.isFinite(responseMin) || responseMin <= 0) responseMin = 3;
+    const blurMs = blurMin * 60 * 1000;
+    const maxMs = 2147483647;
+    return {
+        blurUnfocusedMs: Math.min(blurMs, maxMs),
+        promptResponseSec: Math.round(responseMin * 60),
+    };
 }
 
 function getGroupForTopic(envId, topic) {
@@ -508,6 +531,118 @@ function showConfirm(title, message) {
         cancelBtn.addEventListener('click', onCancel);
         closeBtn.addEventListener('click', onCancel);
     });
+}
+
+function clearConsumerBlurIdleTimer() {
+    if (consumerBlurIdleTimerId) {
+        clearTimeout(consumerBlurIdleTimerId);
+        consumerBlurIdleTimerId = null;
+    }
+}
+
+function scheduleConsumerBlurIdleTimer() {
+    clearConsumerBlurIdleTimer();
+    if (!consumeStarted || consumerIdleModalActive) return;
+    consumerBlurIdleTimerId = setTimeout(() => {
+        consumerBlurIdleTimerId = null;
+        showConsumerStillThereModal();
+    }, getConsumerIdlePrefs().blurUnfocusedMs);
+}
+
+function onWindowBlurForConsumerIdle() {
+    if (!consumeStarted) return;
+    scheduleConsumerBlurIdleTimer();
+}
+
+function onWindowFocusForConsumerIdle() {
+    clearConsumerBlurIdleTimer();
+}
+
+function hideConsumerStillThereModal() {
+    const overlay = document.getElementById('consumer-idle-overlay');
+    if (overlay) overlay.style.display = 'none';
+    if (consumerIdleCountdownIntervalId) {
+        clearInterval(consumerIdleCountdownIntervalId);
+        consumerIdleCountdownIntervalId = null;
+    }
+    consumerIdleModalActive = false;
+}
+
+function resetConsumerIdleWatchdog() {
+    clearConsumerBlurIdleTimer();
+    hideConsumerStillThereModal();
+}
+
+function resetConsumeUIState() {
+    if (window.refreshIntervalId) {
+        clearInterval(window.refreshIntervalId);
+        window.refreshIntervalId = null;
+    }
+    renderConsumerTabBlink(false);
+    setConsumeRunningUI(false);
+    consumeStarted = false;
+    applyReadOnlyState();
+}
+
+async function stopConsumingAndResetUI() {
+    resetConsumerIdleWatchdog();
+    try {
+        await stopConsuming();
+    } catch (_) {
+        /* ignore */
+    }
+    resetConsumeUIState();
+}
+
+function showConsumerStillThereModal() {
+    if (!consumeStarted || consumerIdleModalActive) return;
+    const overlay = document.getElementById('consumer-idle-overlay');
+    const cdEl = document.getElementById('consumer-idle-countdown');
+    const confirmBtn = document.getElementById('consumer-idle-confirm');
+    const stopBtn = document.getElementById('consumer-idle-stop');
+    if (!overlay || !cdEl || !confirmBtn || !stopBtn) return;
+
+    clearConsumerBlurIdleTimer();
+    consumerIdleModalActive = true;
+    overlay.style.display = 'flex';
+    setTimeout(() => confirmBtn.focus(), 50);
+
+    let remaining = getConsumerIdlePrefs().promptResponseSec;
+    const updateDisplay = () => {
+        const m = Math.floor(remaining / 60);
+        const s = remaining % 60;
+        cdEl.textContent = `Stopping in ${m}:${String(s).padStart(2, '0')} unless you keep consuming.`;
+    };
+    updateDisplay();
+
+    const clearCountdown = () => {
+        if (consumerIdleCountdownIntervalId) {
+            clearInterval(consumerIdleCountdownIntervalId);
+            consumerIdleCountdownIntervalId = null;
+        }
+    };
+
+    consumerIdleCountdownIntervalId = setInterval(() => {
+        remaining -= 1;
+        updateDisplay();
+        if (remaining <= 0) {
+            clearCountdown();
+            void stopConsumingAndResetUI();
+        }
+    }, 1000);
+
+    confirmBtn.onclick = () => {
+        clearCountdown();
+        hideConsumerStillThereModal();
+        if (consumeStarted && !document.hasFocus()) {
+            scheduleConsumerBlurIdleTimer();
+        }
+    };
+
+    stopBtn.onclick = () => {
+        clearCountdown();
+        void stopConsumingAndResetUI();
+    };
 }
 
 async function refreshPartitions(topicName) {
@@ -936,16 +1071,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                     consumeMessages(kafka, opts, (msg) => {
                         pushConsumedMessage(msg);
                     }, () => {
-                        clearInterval(window.refreshIntervalId);
-                        renderConsumerTabBlink(false);
-                        setConsumeRunningUI(false);
-                        consumeStarted = false;
-                        applyReadOnlyState();
+                        resetConsumerIdleWatchdog();
+                        resetConsumeUIState();
                     }).catch((err) => {
                         showAlert('Kafka Consumer Error', err.message);
-                        setConsumeRunningUI(false);
-                        consumeStarted = false;
-                        applyReadOnlyState();
+                        resetConsumerIdleWatchdog();
+                        resetConsumeUIState();
                     }).finally(() => {
                         hideLoading();
                     });
@@ -957,17 +1088,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                         renderConsumerTabBlink(consumerBlinkOn);
                     }, 1000);
                     applyReadOnlyState();
+                    if (!document.hasFocus()) {
+                        scheduleConsumerBlurIdleTimer();
+                    }
                 } catch (error) {
                     showAlert('Kafka Consumer Error', error.message);
+                    resetConsumerIdleWatchdog();
+                    resetConsumeUIState();
                     hideLoading();
                 }
             } else {
-                await stopConsuming().finally(() => hideLoading());
-                clearInterval(window.refreshIntervalId);
-                renderConsumerTabBlink(false);
-                setConsumeRunningUI(false);
-                consumeStarted = false;
-                applyReadOnlyState();
+                try {
+                    await stopConsumingAndResetUI();
+                } finally {
+                    hideLoading();
+                }
             }
         });
 
@@ -999,6 +1134,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         wireLagOverviewControls();
         wireClusterOverviewControls();
         wireSetupButton();
+        window.addEventListener('blur', onWindowBlurForConsumerIdle);
+        window.addEventListener('focus', onWindowFocusForConsumerIdle);
         rendererInitialized = true;
         if (pendingConfigUpdate) {
             const cfg = pendingConfigUpdate;
@@ -1187,11 +1324,7 @@ async function reapplyConfig(newConfig) {
         }
 
         if (consumeStarted) {
-            try { await stopConsuming(); } catch (_) { /* ignore */ }
-            clearInterval(window.refreshIntervalId);
-            renderConsumerTabBlink(false);
-            setConsumeRunningUI(false);
-            consumeStarted = false;
+            await stopConsumingAndResetUI();
         }
 
         envConfig = newConfig;

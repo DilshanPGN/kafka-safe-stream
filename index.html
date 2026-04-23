@@ -43,6 +43,20 @@
           </div>
       </div>
   </div>
+  <div id="consumer-idle-overlay" class="consumer-idle-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="consumer-idle-title">
+      <div class="consumer-idle-backdrop" aria-hidden="true"></div>
+      <div id="consumer-idle-dialog" class="custom-alert prompt-modal consumer-idle-modal">
+          <div class="custom-alert-content prompt-content">
+              <h3 id="consumer-idle-title">Are you still there?</h3>
+              <p id="consumer-idle-message">This window was in the background for a while while consuming. Choose an action below. If you do nothing, consuming will stop when the timer ends.</p>
+              <p id="consumer-idle-countdown" class="consumer-idle-countdown" aria-live="polite"></p>
+              <div class="prompt-actions consumer-idle-actions">
+                  <button type="button" id="consumer-idle-stop" class="btn-secondary">Stop consuming</button>
+                  <button type="button" id="consumer-idle-confirm" class="btn-primary">Yes, keep consuming</button>
+              </div>
+          </div>
+      </div>
+  </div>
   <div id="container">
       <aside id="sidebar">
           <div class="brand">KSS</div>
