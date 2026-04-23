@@ -37,6 +37,14 @@
           <h3 id="prompt-title">Enter value</h3>
           <p id="prompt-message"></p>
           <input type="text" id="prompt-input" />
+          <div id="prompt-format-wrap" class="prompt-format-wrap" style="display: none;">
+              <label class="topic-label" for="prompt-format-select">File format</label>
+              <select id="prompt-format-select" class="format-select">
+                  <option value="json">JSON (.json)</option>
+                  <option value="jsonl">JSON Lines (.jsonl)</option>
+                  <option value="csv">CSV (.csv)</option>
+              </select>
+          </div>
           <div class="prompt-actions">
               <button id="prompt-cancel" class="btn-secondary">Cancel</button>
               <button id="prompt-confirm" class="btn-primary">OK</button>
@@ -162,6 +170,12 @@
                                   </select>
                               </label>
                           </div>
+                          <div class="control-row">
+                              <label class="control-checkbox">
+                                  <input type="checkbox" id="consumerTableViewToggle" />
+                                  Table view (metadata columns)
+                              </label>
+                          </div>
                           <div class="control-row options-row--basic-hide">
                               <span class="control-label">Start from</span>
                               <div class="radio-group" id="startModeGroup">
@@ -222,8 +236,19 @@
                       </div>
                   </div>
                   <div id="consumerFetchStatus" class="consumer-fetch-status" role="status" aria-live="polite"></div>
-                  <div id="consumedMessages"></div>
+                  <div id="consumerMessagesPanel" class="consumer-messages-panel">
+                      <div id="consumedMessages" class="consumer-messages-cm-host"></div>
+                      <div id="consumedMessagesTableWrap" class="consumer-messages-table-wrap" hidden>
+                          <div class="consumer-messages-table-scroll">
+                              <table class="consumer-messages-table" aria-label="Consumed messages">
+                                  <thead id="consumedMessagesTableHead"></thead>
+                                  <tbody id="consumedMessagesTableBody"></tbody>
+                              </table>
+                          </div>
+                      </div>
+                  </div>
                   <div class="actions">
+                      <button type="button" id="exportConsumedButton" class="btn-secondary">Export</button>
                       <button id="clearMessages">Clear</button>
                       <button id="consumeButton">Start Consuming</button>
                   </div>

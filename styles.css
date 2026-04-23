@@ -672,9 +672,126 @@ body.options-resizing * {
 }
 
 #payload,
-#consumedMessages {
+#consumerMessagesPanel {
     flex: 1;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.consumer-messages-cm-host {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.consumer-messages-cm-host .CodeMirror {
+    flex: 1;
+    min-height: 120px;
+}
+
+.consumer-messages-table-wrap {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-soft);
+    overflow: hidden;
+}
+
+/* Author `display: flex` above must not beat HTML `[hidden]` (otherwise the table
+   still lays out and steals half the flex area next to CodeMirror). */
+.consumer-messages-table-wrap[hidden] {
+    display: none !important;
+}
+
+.consumer-messages-table-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+.consumer-messages-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    table-layout: auto;
+}
+
+.consumer-messages-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--color-bg-muted);
+    color: var(--color-text-subtle);
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--color-border);
+    font-weight: 700;
+    text-transform: none;
+    letter-spacing: 0;
+    white-space: nowrap;
+}
+
+.consumer-messages-table tbody td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text);
+    vertical-align: top;
+    word-break: break-word;
+    max-width: 320px;
+}
+
+.consumer-messages-table tbody tr:nth-child(even) {
+    background: var(--color-bg-elev);
+}
+
+.consumer-messages-table tbody tr:hover {
+    background: var(--color-bg-muted);
+}
+
+.consumer-messages-table .consumer-msg-value-cell {
+    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+    font-size: 12px;
+    color: var(--color-accent);
+}
+
+.consumer-messages-table .consumer-msg-empty {
+    text-align: center;
+    color: var(--color-text-subtle);
+    padding: 24px 12px;
+}
+
+#consumerContainer .actions {
+    flex-wrap: wrap;
+}
+
+#consumerContainer .actions .btn-secondary {
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    box-shadow: none;
+}
+
+#consumerContainer .actions .btn-secondary:hover {
+    border-color: var(--color-accent);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+.prompt-format-wrap {
+    margin-bottom: 14px;
+}
+
+.prompt-format-wrap .format-select {
+    width: 100%;
+    margin-top: 6px;
 }
 
 #produceButton:disabled,

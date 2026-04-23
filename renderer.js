@@ -104,6 +104,8 @@ window.refreshIntervalId = null;
 let lagTopic = '';
 let lagOverviewData = null;
 let lagResetInFlight = false;
+/** When true, consumed messages render as a table instead of CodeMirror. */
+let consumerTableView = false;
 let consumerBlurIdleTimerId = null;
 let consumerIdleCountdownIntervalId = null;
 let consumerIdleModalActive = false;
@@ -135,6 +137,7 @@ function savePreferences(prefs) {
  * - lastActiveEnvId — environment restored on startup
  * - lastActiveMethodByEnv — map of env id → last main tab (producer, consumer, …)
  * - lastActiveMethod — global fallback for the active tab
+ * - consumerTableView — show consumer messages as metadata table vs stream editor
  *
  * Consumer background-idle:
  * consumerIdle.blurUnfocusedMinutes — unfocused time before "still there?" (default 60 = 1 hour).
@@ -624,6 +627,159 @@ function applyConsumerFormat(format, { skipStorage } = {}) {
     }
 }
 
+function loadConsumerTableViewPreference() {
+    const prefs = loadPreferences();
+    consumerTableView = !!prefs.consumerTableView;
+    const toggle = document.getElementById('consumerTableViewToggle');
+    if (toggle) toggle.checked = consumerTableView;
+}
+
+function persistConsumerTableViewPreference(on) {
+    const prefs = loadPreferences();
+    prefs.consumerTableView = !!on;
+    savePreferences(prefs);
+}
+
+function decodeHeaderValue(v) {
+    if (v == null) return '';
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(v)) return v.toString('utf8');
+    if (v instanceof Uint8Array) return Buffer.from(v).toString('utf8');
+    if (typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+        return Buffer.from(v.data).toString('utf8');
+    }
+    return String(v);
+}
+
+function normalizeHeaders(headers) {
+    const out = {};
+    if (!headers || typeof headers !== 'object') return out;
+    for (const [k, v] of Object.entries(headers)) {
+        out[k] = decodeHeaderValue(v);
+    }
+    return out;
+}
+
+function collectHeaderKeysFromMessages(messages) {
+    const set = new Set();
+    for (const m of messages) {
+        const h = normalizeHeaders(m.headers || {});
+        Object.keys(h).forEach((k) => set.add(k));
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+function formatTimestampDisplay(ts) {
+    if (ts == null || ts === '') return '—';
+    const n = Number(ts);
+    if (Number.isFinite(n)) {
+        const d = new Date(n);
+        if (!Number.isNaN(d.getTime())) {
+            const pad = (x) => String(x).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+                + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        }
+    }
+    return String(ts);
+}
+
+/**
+ * Filter matches message key and value only (not record headers).
+ */
+function getFilteredConsumedMessages() {
+    const filterInput = document.getElementById('filterInput');
+    const regexToggle = document.getElementById('filterRegex');
+    const term = (filterInput && filterInput.value) || '';
+    const useRegex = regexToggle && regexToggle.checked;
+
+    let filtered = consumedMessages;
+    if (term.trim().length > 0) {
+        if (useRegex) {
+            try {
+                const re = new RegExp(term, 'i');
+                filtered = consumedMessages.filter((m) => re.test(m.value) || re.test(String(m.key || '')));
+            } catch (_) {
+                filtered = consumedMessages;
+            }
+        } else {
+            const lower = term.toLowerCase();
+            filtered = consumedMessages.filter((m) =>
+                m.value.toLowerCase().includes(lower) ||
+                String(m.key || '').toLowerCase().includes(lower));
+        }
+    }
+    return filtered;
+}
+
+function applyConsumerSurfaceVisibility() {
+    const cmHost = document.getElementById('consumedMessages');
+    const tableWrap = document.getElementById('consumedMessagesTableWrap');
+    if (!cmHost || !tableWrap) return;
+    if (consumerTableView) {
+        cmHost.style.display = 'none';
+        tableWrap.hidden = false;
+    } else {
+        cmHost.style.display = '';
+        tableWrap.hidden = true;
+        if (consumer) {
+            try {
+                consumer.refresh();
+            } catch (_) { /* ignore */ }
+        }
+    }
+}
+
+function renderConsumerTable(filtered) {
+    const thead = document.getElementById('consumedMessagesTableHead');
+    const tbody = document.getElementById('consumedMessagesTableBody');
+    if (!thead || !tbody) return;
+
+    const headerKeys = collectHeaderKeysFromMessages(filtered);
+    const fixedTh = ['Par', 'Offset', 'Timestamp', 'Key', 'Value'].map((label) => `<th>${escapeHtml(label)}</th>`).join('');
+    const dynTh = headerKeys.map((k) => `<th>${escapeHtml(k)}</th>`).join('');
+    thead.innerHTML = `<tr>${fixedTh}${dynTh}</tr>`;
+
+    if (filtered.length === 0) {
+        const colSpan = 5 + headerKeys.length;
+        tbody.innerHTML = `<tr><td class="consumer-msg-empty" colspan="${colSpan}">No messages yet.</td></tr>`;
+        return;
+    }
+
+    const maxCell = 400;
+    const trunc = (s) => {
+        const t = s == null ? '' : String(s);
+        if (t.length <= maxCell) return { html: escapeHtml(t), title: '' };
+        return { html: `${escapeHtml(t.slice(0, maxCell))}…`, title: escapeHtml(t) };
+    };
+
+    tbody.innerHTML = filtered.map((m) => {
+        const h = normalizeHeaders(m.headers || {});
+        const ts = formatTimestampDisplay(m.timestamp);
+        const keyDisp = trunc(m.key != null && m.key !== '' ? String(m.key) : '—');
+        const valDisp = trunc(m.value != null ? String(m.value) : '');
+        const keyTitle = keyDisp.title ? ` title="${keyDisp.title}"` : '';
+        const valTitle = valDisp.title ? ` title="${valDisp.title}"` : '';
+        const fixedCells = `
+            <td>${escapeHtml(String(m.partition))}</td>
+            <td>${escapeHtml(String(m.offset))}</td>
+            <td class="consumer-msg-ts-cell">${escapeHtml(ts)}</td>
+            <td${keyTitle}>${keyDisp.html}</td>
+            <td class="consumer-msg-value-cell"${valTitle}>${valDisp.html}</td>`;
+        const dynCells = headerKeys.map((hk) => {
+            const raw = h[hk] != null && h[hk] !== '' ? String(h[hk]) : '—';
+            const d = trunc(raw === '—' ? '—' : raw);
+            const tit = d.title ? ` title="${d.title}"` : '';
+            return `<td${tit}>${d.html}</td>`;
+        }).join('');
+        return `<tr>${fixedCells}${dynCells}</tr>`;
+    }).join('');
+
+    const wrap = document.getElementById('consumedMessagesTableWrap');
+    if (wrap) {
+        const sc = wrap.querySelector('.consumer-messages-table-scroll');
+        if (sc) sc.scrollTop = sc.scrollHeight;
+    }
+}
+
 function formatConsumedEntry(msg) {
     let body = msg.value;
     if (consumerFormat === 'json') {
@@ -645,37 +801,161 @@ function formatConsumedEntry(msg) {
 }
 
 function applyFilter() {
-    const filterInput = document.getElementById('filterInput');
-    const regexToggle = document.getElementById('filterRegex');
     const messageCount = document.getElementById('messageCount');
-    const term = (filterInput && filterInput.value) || '';
-    const useRegex = regexToggle && regexToggle.checked;
+    const filtered = getFilteredConsumedMessages();
 
-    let filtered = consumedMessages;
-    if (term.trim().length > 0) {
-        if (useRegex) {
-            try {
-                const re = new RegExp(term, 'i');
-                filtered = consumedMessages.filter((m) => re.test(m.value) || re.test(String(m.key || '')));
-            } catch (_) {
-                filtered = consumedMessages;
-            }
-        } else {
-            const lower = term.toLowerCase();
-            filtered = consumedMessages.filter((m) =>
-                m.value.toLowerCase().includes(lower) ||
-                String(m.key || '').toLowerCase().includes(lower));
-        }
+    if (messageCount) {
+        messageCount.textContent = `${filtered.length} / ${consumedMessages.length}`;
     }
+
+    applyConsumerSurfaceVisibility();
+
+    if (consumerTableView) {
+        renderConsumerTable(filtered);
+        return;
+    }
+
+    if (!consumer) return;
 
     const text = filtered.map(formatConsumedEntry).join(LINE_SEPARATOR) +
         (filtered.length > 0 ? LINE_SEPARATOR : '');
     consumer.setValue(text);
     const lastLine = consumer.getScrollInfo().height;
     consumer.scrollTo(0, lastLine);
+}
 
-    if (messageCount) {
-        messageCount.textContent = `${filtered.length} / ${consumedMessages.length}`;
+function buildExportRows(messages) {
+    return messages.map((m) => ({
+        topic: m.topic,
+        partition: m.partition,
+        offset: m.offset,
+        timestamp: m.timestamp,
+        key: m.key,
+        value: m.value,
+        headers: normalizeHeaders(m.headers || {}),
+    }));
+}
+
+function collectHeaderKeysFromExportRows(rows) {
+    const set = new Set();
+    for (const r of rows) {
+        if (r.headers && typeof r.headers === 'object') {
+            Object.keys(r.headers).forEach((k) => set.add(k));
+        }
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+function escapeCsvCell(s) {
+    const str = s == null ? '' : String(s);
+    if (/[",\n\r]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+}
+
+function serializeExportCsv(rows) {
+    const headerKeys = collectHeaderKeysFromExportRows(rows);
+    const cols = ['partition', 'offset', 'timestamp', 'key', 'value', ...headerKeys];
+    const lines = [cols.join(',')];
+    for (const r of rows) {
+        const cells = [
+            r.partition,
+            r.offset,
+            r.timestamp,
+            r.key ?? '',
+            r.value ?? '',
+            ...headerKeys.map((hk) => (r.headers && r.headers[hk] != null) ? r.headers[hk] : ''),
+        ].map(escapeCsvCell);
+        lines.push(cells.join(','));
+    }
+    return `${lines.join('\n')}\n`;
+}
+
+function showExportFormatDialog() {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('prompt-modal');
+        const titleEl = document.getElementById('prompt-title');
+        const messageEl = document.getElementById('prompt-message');
+        const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
+        const formatSelect = document.getElementById('prompt-format-select');
+        const confirmBtn = document.getElementById('prompt-confirm');
+        const cancelBtn = document.getElementById('prompt-cancel');
+        const closeBtn = document.getElementById('prompt-close');
+
+        if (!modal || !formatWrap || !formatSelect) {
+            resolve(null);
+            return;
+        }
+
+        titleEl.textContent = 'Export consumed messages';
+        messageEl.textContent = 'Choose a format, then pick where to save the file.';
+        input.style.display = 'none';
+        formatWrap.style.display = 'block';
+        formatSelect.value = 'json';
+        modal.style.display = 'block';
+        setTimeout(() => formatSelect.focus(), 50);
+
+        const cleanup = (value) => {
+            modal.style.display = 'none';
+            input.style.display = '';
+            formatWrap.style.display = 'none';
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+            closeBtn.removeEventListener('click', onCancel);
+            formatSelect.removeEventListener('keydown', onKey);
+            resolve(value);
+        };
+        const onConfirm = () => cleanup(formatSelect.value || null);
+        const onCancel = () => cleanup(null);
+        const onKey = (e) => {
+            if (e.key === 'Enter') onConfirm();
+            if (e.key === 'Escape') onCancel();
+        };
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+        closeBtn.addEventListener('click', onCancel);
+        formatSelect.addEventListener('keydown', onKey);
+    });
+}
+
+async function handleExportConsumed() {
+    const filtered = getFilteredConsumedMessages();
+    if (!filtered.length) {
+        showAlert('Export', 'Nothing to export.');
+        return;
+    }
+    const format = await showExportFormatDialog();
+    if (!format || !['json', 'jsonl', 'csv'].includes(format)) return;
+
+    const defaultPath = format === 'json' ? 'consumed-messages.json'
+        : format === 'jsonl' ? 'consumed-messages.jsonl'
+            : 'consumed-messages.csv';
+    const result = await ipcRenderer.invoke('save-consumed-export', {
+        defaultPath,
+        filters: [
+            { name: 'JSON', extensions: ['json'] },
+            { name: 'JSON Lines', extensions: ['jsonl', 'ndjson'] },
+            { name: 'CSV', extensions: ['csv'] },
+        ],
+    });
+    if (!result || result.canceled || !result.filePath) return;
+
+    const rows = buildExportRows(filtered);
+    let body;
+    if (format === 'json') {
+        body = JSON.stringify(rows, null, 2);
+    } else if (format === 'jsonl') {
+        body = rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : '');
+    } else {
+        body = serializeExportCsv(rows);
+    }
+    try {
+        fs.writeFileSync(result.filePath, body, 'utf8');
+        showAlert('Export', `Saved ${filtered.length} message(s).`);
+    } catch (err) {
+        showAlert('Export failed', err.message || String(err));
     }
 }
 
@@ -761,9 +1041,12 @@ function showPrompt(title, message, defaultValue = '') {
         const titleEl = document.getElementById('prompt-title');
         const messageEl = document.getElementById('prompt-message');
         const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
         const confirmBtn = document.getElementById('prompt-confirm');
         const cancelBtn = document.getElementById('prompt-cancel');
         const closeBtn = document.getElementById('prompt-close');
+        if (formatWrap) formatWrap.style.display = 'none';
+        input.style.display = '';
         titleEl.textContent = title;
         messageEl.textContent = message;
         input.value = defaultValue;
@@ -797,9 +1080,11 @@ function showConfirm(title, message) {
         const titleEl = document.getElementById('prompt-title');
         const messageEl = document.getElementById('prompt-message');
         const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
         const confirmBtn = document.getElementById('prompt-confirm');
         const cancelBtn = document.getElementById('prompt-cancel');
         const closeBtn = document.getElementById('prompt-close');
+        if (formatWrap) formatWrap.style.display = 'none';
         titleEl.textContent = title;
         messageEl.textContent = message;
         input.value = '';
@@ -1734,6 +2019,25 @@ function readConsumerOptions() {
 }
 
 function wireConsumerControls() {
+    loadConsumerTableViewPreference();
+    const tableToggle = document.getElementById('consumerTableViewToggle');
+    if (tableToggle) {
+        tableToggle.addEventListener('change', () => {
+            consumerTableView = tableToggle.checked;
+            persistConsumerTableViewPreference(consumerTableView);
+            applyFilter();
+        });
+    }
+
+    const exportBtn = document.getElementById('exportConsumedButton');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', () => {
+            handleExportConsumed().catch((err) => {
+                showAlert('Export failed', err.message || String(err));
+            });
+        });
+    }
+
     const startModeRadios = document.querySelectorAll('input[name="startMode"]');
     const offsetRow = document.getElementById('offsetRow');
     startModeRadios.forEach((r) => {

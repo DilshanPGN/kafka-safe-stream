@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -141,6 +141,22 @@ ipcMain.on('config-saved', () => {
     } catch (err) {
         console.error('Failed to forward config-updated:', err);
     }
+});
+
+ipcMain.handle('save-consumed-export', async (_event, { defaultPath, filters }) => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    if (!win) {
+        return { canceled: true, filePath: undefined };
+    }
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+        defaultPath: defaultPath || 'consumed-messages.json',
+        filters: filters && filters.length ? filters : [
+            { name: 'JSON', extensions: ['json'] },
+            { name: 'JSON Lines', extensions: ['jsonl', 'ndjson'] },
+            { name: 'CSV', extensions: ['csv'] },
+        ],
+    });
+    return { canceled, filePath };
 });
 
 // Menu template
