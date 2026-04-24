@@ -561,61 +561,6 @@ async function resetConsumerGroupOffsetsToLatest(kafka, options) {
 }
 
 /**
- * Bulk reset: one admin session and one fetchTopicOffsets for the topic, then setOffsets per group.
- * (Per-group reset used to connect/disconnect and re-fetch offsets for every group, which is very slow.)
- */
-async function resetConsumerGroupsOffsetsToLatest(kafka, options) {
-    const topic = options && String(options.topic || '').trim();
-    const groupIds = [...new Set((options && options.groupIds ? options.groupIds : [])
-        .map((g) => String(g || '').trim())
-        .filter(Boolean))];
-    if (!topic) throw new Error('topic is required');
-    if (!groupIds.length) throw new Error('At least one groupId is required');
-
-    const admin = kafka.admin();
-    const results = [];
-    try {
-        await admin.connect();
-        const topicOffsets = await admin.fetchTopicOffsets(topic);
-        const partitions = topicOffsetsToLatestPartitions(topicOffsets);
-        if (!partitions.length) {
-            throw new Error(`No partition offsets found for topic "${topic}"`);
-        }
-
-        for (const groupId of groupIds) {
-            try {
-                await admin.setOffsets({ groupId, topic, partitions });
-                results.push({
-                    ok: true,
-                    groupId,
-                    topic,
-                    partitionCount: partitions.length,
-                });
-            } catch (err) {
-                results.push({
-                    ok: false,
-                    groupId,
-                    topic,
-                    error: err.message || String(err),
-                });
-            }
-        }
-    } finally {
-        await safeAdminDisconnect(admin);
-    }
-
-    const successCount = results.filter((r) => r.ok).length;
-    const failureCount = results.length - successCount;
-    return {
-        topic,
-        total: results.length,
-        successCount,
-        failureCount,
-        results,
-    };
-}
-
-/**
  * Delete consumer groups via the broker (groups must be inactive / empty per Kafka rules).
  */
 async function deleteConsumerGroups(kafka, options) {
@@ -818,7 +763,6 @@ module.exports = {
     getTopicOffsets,
     getConsumerLagOverview,
     resetConsumerGroupOffsetsToLatest,
-    resetConsumerGroupsOffsetsToLatest,
     deleteConsumerGroups,
     appendOffsetResetAudit,
     getClusterMetadata,

@@ -9,7 +9,6 @@ const {
     getTopicOffsets,
     getConsumerLagOverview,
     resetConsumerGroupOffsetsToLatest,
-    resetConsumerGroupsOffsetsToLatest,
     deleteConsumerGroups,
     appendOffsetResetAudit,
     getClusterMetadata,
@@ -120,6 +119,19 @@ let lagResetInFlight = false;
 let consumerTableView = false;
 /** Last rows rendered in the consumer table (for “View payload” window). */
 let lastConsumerTableFilteredSnapshot = [];
+
+function isUnsafeConsumerGroupOpsAllowed() {
+    if (!envConfig || !activeEnv) return false;
+    const env = envConfig[activeEnv];
+    return Boolean(env && env.allowedUnsafeOperations === true);
+}
+
+function syncUnsafeConsumerGroupBodyAttr() {
+    document.body.setAttribute(
+        'data-kss-unsafe-consumer-groups',
+        isUnsafeConsumerGroupOpsAllowed() ? 'true' : 'false',
+    );
+}
 let consumerTablePayloadClickBound = false;
 let consumerBlurIdleTimerId = null;
 let consumerIdleCountdownIntervalId = null;
@@ -1735,16 +1747,7 @@ function clearLagOverviewUI(message) {
 }
 
 function setLagResetControlsState() {
-    const bulkBtn = document.getElementById('lagResetAllButton');
-    const bulkDelBtn = document.getElementById('lagDeleteAllButton');
-    const hasGroups = !!(lagOverviewData && Array.isArray(lagOverviewData.groups) && lagOverviewData.groups.length);
     const busy = lagResetInFlight;
-    if (bulkBtn) {
-        bulkBtn.disabled = busy || !hasGroups;
-    }
-    if (bulkDelBtn) {
-        bulkDelBtn.disabled = busy || !hasGroups;
-    }
     document.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
         btn.disabled = busy;
     });
@@ -1753,11 +1756,10 @@ function setLagResetControlsState() {
     });
 }
 
-async function confirmLagReset(scope, topic, groupIds) {
-    const scopeLabel = scope === 'bulk' ? 'all shown groups' : `group "${groupIds[0]}"`;
+async function confirmLagReset(topic, groupId) {
     const confirmed = await showConfirm(
         'Reset offsets to latest?',
-        `You are about to reset committed offsets for ${scopeLabel} on topic "${topic}". This can immediately clear lag. Active consumers may commit different offsets again after this action. Continue?`
+        `You are about to reset committed offsets for group "${groupId}" on topic "${topic}". This can immediately clear lag. Active consumers may commit different offsets again after this action. Continue?`
     );
     if (!confirmed) return null;
 
@@ -1775,28 +1777,31 @@ async function confirmLagReset(scope, topic, groupIds) {
     return reason;
 }
 
-async function confirmLagDelete(scope, topic, groupIds) {
-    const scopeLabel = scope === 'bulk'
-        ? `all ${groupIds.length} group(s) currently listed for topic "${topic}"`
-        : `consumer group "${groupIds[0]}"`;
+async function confirmLagDelete(groupId) {
     return showConfirm(
-        'Delete consumer group(s)?',
-        `This will permanently remove ${scopeLabel} from the cluster (group metadata and committed offsets). Kafka only allows deletion when a group has no active members (state Empty or Dead). Stop any consumers using this group first. This cannot be undone. Continue?`
+        'Delete consumer group?',
+        `This will permanently remove consumer group "${groupId}" from the cluster (group metadata and committed offsets). Kafka only allows deletion when a group has no active members (state Empty or Dead). Stop any consumers using this group first. This cannot be undone. Continue?`
     );
 }
 
-async function handleLagDelete(scope, groupIds) {
+async function handleLagDelete(groupId) {
     const topic = lagTopic;
     if (!topic) {
         showAlert('Delete consumer group', 'Select a topic first.');
         return;
     }
-    const targets = [...new Set((groupIds || []).filter(Boolean))];
-    if (!targets.length) {
-        showAlert('Delete consumer group', 'No consumer groups selected.');
+    if (!isUnsafeConsumerGroupOpsAllowed()) {
+        showAlert(
+            'Not available',
+            'Deleting consumer groups is disabled for this environment. Set "allowedUnsafeOperations" to true in the config JSON (~/.kss/.config) or in Setup → Advanced → edit JSON.',
+        );
         return;
     }
-    const confirmed = await confirmLagDelete(scope, topic, targets);
+    if (!groupId) {
+        showAlert('Delete consumer group', 'No consumer group selected.');
+        return;
+    }
+    const confirmed = await confirmLagDelete(groupId);
     if (!confirmed) return;
 
     lagResetInFlight = true;
@@ -1804,19 +1809,16 @@ async function handleLagDelete(scope, groupIds) {
     showLoading();
     try {
         const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
-            deleteConsumerGroups(kafka, { groupIds: targets }));
+            deleteConsumerGroups(kafka, { groupIds: [groupId] }));
         if (details.failureCount === 0) {
-            showAlert('Consumer group deleted', `Deleted ${details.successCount} group(s).`);
-        } else if (details.successCount > 0) {
-            const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
-            showAlert('Delete consumer groups (partial)', `Removed ${details.successCount} group(s); ${details.failureCount} failed. Example: ${firstErr}`);
+            showAlert('Consumer group deleted', 'Deleted 1 group.');
         } else {
             const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
-            showAlert('Delete consumer groups failed', firstErr);
+            showAlert('Delete consumer group failed', firstErr);
         }
         await loadConsumerLagOverview();
     } catch (err) {
-        showAlert('Delete consumer groups failed', err.message || String(err));
+        showAlert('Delete consumer group failed', err.message || String(err));
     } finally {
         lagResetInFlight = false;
         hideLoading();
@@ -1824,34 +1826,24 @@ async function handleLagDelete(scope, groupIds) {
     }
 }
 
-function showBulkOffsetResetResultAlerts(details, topic) {
-    const partial = details.failureCount > 0 && details.successCount > 0;
-    const failedOnly = details.failureCount > 0 && details.successCount === 0;
-    if (!partial && !failedOnly) {
-        showAlert('Offset reset', `Reset offsets to latest for ${details.successCount} group(s) on "${topic}".`);
-        return 'success';
-    }
-    if (partial) {
-        showAlert('Offset reset (partial)', `Reset succeeded for ${details.successCount} group(s), failed for ${details.failureCount}.`);
-        return 'partial';
-    }
-    const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
-    showAlert('Offset reset failed', firstErr);
-    return 'failed';
-}
-
-async function handleLagReset(scope, groupIds) {
+async function handleLagReset(groupId) {
     const topic = lagTopic;
     if (!topic) {
         showAlert('Offset reset', 'Select a topic first.');
         return;
     }
-    const targets = [...new Set((groupIds || []).filter(Boolean))];
-    if (!targets.length) {
-        showAlert('Offset reset', 'No consumer groups available to reset.');
+    if (!isUnsafeConsumerGroupOpsAllowed()) {
+        showAlert(
+            'Not available',
+            'Resetting offsets to latest is disabled for this environment. Set "allowedUnsafeOperations" to true in the config JSON (~/.kss/.config) or in Setup → Advanced → edit JSON.',
+        );
         return;
     }
-    const reason = await confirmLagReset(scope, topic, targets);
+    if (!groupId) {
+        showAlert('Offset reset', 'No consumer group selected.');
+        return;
+    }
+    const reason = await confirmLagReset(topic, groupId);
     if (reason === null) return;
 
     const osUsername = (() => {
@@ -1867,28 +1859,19 @@ async function handleLagReset(scope, groupIds) {
     setLagResetControlsState();
     showLoading();
     try {
-        let outcome = 'success';
-        let details;
-
-        if (scope === 'bulk') {
-            details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
-                resetConsumerGroupsOffsetsToLatest(kafka, { topic, groupIds: targets }));
-            outcome = showBulkOffsetResetResultAlerts(details, topic);
-        } else {
-            details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
-                resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId: targets[0] }));
-            showAlert('Offset reset', `Reset offsets to latest for "${targets[0]}" on "${topic}".`);
-        }
+        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+            resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId }));
+        showAlert('Offset reset', `Reset offsets to latest for "${groupId}" on "${topic}".`);
 
         try {
             appendOffsetResetAudit({
-                scope,
+                scope: 'single',
                 topic,
-                groupIds: targets,
+                groupIds: [groupId],
                 operatorReason: reason,
                 osUsername,
                 activeEnv,
-                outcome,
+                outcome: 'success',
                 details,
             });
         } catch (auditErr) {
@@ -1947,6 +1930,15 @@ function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
     const tr = document.createElement('tr');
     const { committedCell, lagCell } = lagCommittedAndLagCells(pr);
     const { clientsTitle, clientsBody } = lagClientsCells(clientsStr, clientsShort);
+    const unsafe = isUnsafeConsumerGroupOpsAllowed();
+    const actionCell = unsafe
+        ? `<td class="lag-action-cell lag-col-actions">
+                    <div class="lag-action-buttons">
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
+                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
+                    </div>
+                </td>`
+        : '<td class="lag-action-cell lag-col-actions" aria-hidden="true"></td>';
     tr.innerHTML = `
                 <td class="topic-cell">${escapeHtml(g.groupId)}</td>
                 <td>${escapeHtml(String(g.state))}</td>
@@ -1956,12 +1948,7 @@ function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
                 <td>${committedCell}</td>
                 <td>${escapeHtml(String(pr.logEnd))}</td>
                 <td>${lagCell}</td>
-                <td class="lag-action-cell lag-col-actions">
-                    <div class="lag-action-buttons">
-                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
-                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
-                    </div>
-                </td>
+                ${actionCell}
             `;
     body.appendChild(tr);
 }
@@ -1988,7 +1975,7 @@ function bindLagOverviewRowActions(body) {
                 return;
             }
             if (!groupId) return;
-            handleLagReset('single', [groupId]);
+            handleLagReset(groupId);
         });
     });
     body.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
@@ -2001,7 +1988,7 @@ function bindLagOverviewRowActions(body) {
                 return;
             }
             if (!groupId) return;
-            handleLagDelete('single', [groupId]);
+            handleLagDelete(groupId);
         });
     });
 }
@@ -2191,24 +2178,6 @@ function wireClusterOverviewControls() {
 function wireLagOverviewControls() {
     const btn = document.getElementById('lagLoadButton');
     if (btn) btn.addEventListener('click', () => loadConsumerLagOverview());
-    const resetAllBtn = document.getElementById('lagResetAllButton');
-    if (resetAllBtn) {
-        resetAllBtn.addEventListener('click', () => {
-            const ids = (lagOverviewData && Array.isArray(lagOverviewData.groups))
-                ? lagOverviewData.groups.map((g) => g.groupId).filter(Boolean)
-                : [];
-            handleLagReset('bulk', ids);
-        });
-    }
-    const deleteAllBtn = document.getElementById('lagDeleteAllButton');
-    if (deleteAllBtn) {
-        deleteAllBtn.addEventListener('click', () => {
-            const ids = (lagOverviewData && Array.isArray(lagOverviewData.groups))
-                ? lagOverviewData.groups.map((g) => g.groupId).filter(Boolean)
-                : [];
-            handleLagDelete('bulk', ids);
-        });
-    }
     setLagResetControlsState();
 }
 
@@ -2775,6 +2744,7 @@ const onEnvChange = (envId) => {
     reloadProduceButton();
     updateSummaryCards();
     applyConsumerGroupFieldState();
+    syncUnsafeConsumerGroupBodyAttr();
 
     persistLastEnv(activeEnv);
     hideLoading();

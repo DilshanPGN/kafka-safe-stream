@@ -14,6 +14,10 @@
                     "type": "array",
                     "items": { "type": "string" }
                 },
+                "allowedUnsafeOperations": {
+                    "type": "boolean",
+                    "description": "When true, enables consumer-group offset reset and delete-group actions in the app. Set only by editing config JSON, not the setup form."
+                },
                 "connection": {
                     "type": "object",
                     "properties": {

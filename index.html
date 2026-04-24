@@ -20,7 +20,7 @@
     <script src='codemirror/xml.min.js'></script>
     <script src='codemirror/placeholder.min.js'></script>
 </head>
-<body data-theme="dark">
+<body data-theme="dark" data-kss-unsafe-consumer-groups="false">
   <div id="loading-container">
       <span class="loader"></span>
   </div>
@@ -340,13 +340,11 @@
               </div>
               <div id="consumerLagContainer">
                   <div class="panel-heading">Consumer groups &amp; lag</div>
-                  <p class="lag-hint">Pick a topic, then load committed offsets for every consumer group in the cluster. Only groups with at least one committed offset on this topic are listed. Large clusters may take a while.</p>
+                  <p class="lag-hint">Pick a topic, then load committed offsets for every consumer group in the cluster. Only groups with at least one committed offset on this topic are listed. Large clusters may take a while. Resetting offsets or deleting groups is hidden by default; enable only by setting <code>allowedUnsafeOperations</code> to <code>true</code> for this environment in the config JSON (file or Setup → Advanced → edit JSON).</p>
                   <div class="lag-toolbar">
                       <label class="topic-label" for="lagTopicSelect">Topic</label>
                       <select id="lagTopicSelect"></select>
                       <button id="lagLoadButton" type="button" class="btn-primary">Load</button>
-                      <button id="lagResetAllButton" type="button" class="btn-secondary lag-reset-all-button lag-toolbar-advanced" disabled>Reset all shown groups to latest</button>
-                      <button id="lagDeleteAllButton" type="button" class="btn-danger lag-delete-all-button lag-toolbar-advanced" disabled>Delete all listed groups</button>
                   </div>
                   <div id="lagStatus" class="lag-status"></div>
                   <div id="lagTableWrapper" class="topics-table-wrapper">

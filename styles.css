@@ -407,9 +407,9 @@ body[data-app-mode="basic"] #optionsProducerSection > .options-subheading {
     color: var(--color-text-muted);
 }
 
-/* Consumer lag: offset reset/delete are advanced-only */
+/* Consumer lag: offset reset/delete are advanced-only; destructive ops also require allowedUnsafeOperations in config JSON */
 body[data-app-mode="basic"] #consumerLagContainer .lag-col-actions,
-body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
+body[data-kss-unsafe-consumer-groups="false"] #consumerLagContainer .lag-col-actions {
     display: none !important;
 }
 
@@ -1742,11 +1742,6 @@ body.options-resizing * {
     align-items: flex-end;
     gap: 12px;
     margin-bottom: 10px;
-}
-
-.lag-reset-all-button,
-.lag-delete-all-button {
-    min-height: 34px;
 }
 
 .lag-toolbar #lagTopicSelect {

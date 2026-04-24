@@ -575,6 +575,21 @@ body {
     margin-top: 12px;
 }
 
+.setup-advanced-hint {
+    margin: 0 0 12px;
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    line-height: 1.5;
+}
+
+.setup-advanced-hint code {
+    font-size: 0.78rem;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--color-bg-muted);
+    border: 1px solid var(--color-border);
+}
+
 .setup-json-text {
     width: 100%;
     min-height: 160px;

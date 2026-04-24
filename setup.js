@@ -19,7 +19,7 @@ const schemaPath = path.join(__dirname, 'schema.json');
 const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 const ajv = new Ajv();
 
-/** @type {{ id: string, label: string, brokersText: string, topicList: string[], topicFilter: string, probeResult: object|null }[]} */
+/** @type {{ id: string, label: string, brokersText: string, topicList: string[], topicFilter: string, probeResult: object|null, allowedUnsafeOperations?: boolean }[]} */
 let environments = [];
 let activeIndex = 0;
 let probeInFlight = false;
@@ -112,6 +112,9 @@ function buildConfigObject() {
             brokers: brokerListFromInput(e.brokersText),
             topicList: e.topicList.slice(),
         };
+        if (e.allowedUnsafeOperations === true) {
+            entry.allowedUnsafeOperations = true;
+        }
         const conn = normalizeConnection(e.connection);
         const defConn = normalizeConnection({});
         if (JSON.stringify(conn) !== JSON.stringify(defConn)) {
@@ -149,6 +152,7 @@ function applyConfigFromObject(obj) {
             topicFilter: '',
             probeResult: null,
             connection: normalizeConnection(e.connection),
+            allowedUnsafeOperations: e.allowedUnsafeOperations === true,
             probeSecrets: {
                 password: '',
                 oauthAccessToken: '',

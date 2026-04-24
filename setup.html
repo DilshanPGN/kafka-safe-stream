@@ -38,6 +38,9 @@
           <details class="setup-advanced" id="advancedDetails">
             <summary class="setup-advanced-summary">Advanced: edit JSON</summary>
             <div class="setup-advanced-body">
+              <p class="setup-advanced-hint">
+                Optional per-environment key <code>allowedUnsafeOperations</code> (boolean): only when <code>true</code> does the main app show consumer-group <strong>offset reset</strong> and <strong>delete group</strong> actions. There is no form control for this; add it here or by editing the config file directly.
+              </p>
               <textarea id="configJsonText" class="setup-json-text" spellcheck="false" placeholder="{ }"></textarea>
               <button type="button" id="applyJsonBtn" class="btn btn-secondary">Load from JSON</button>
             </div>
