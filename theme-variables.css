@@ -1,10 +1,11 @@
 :root {
-    --color-bg: #f4f6fb;
-    --color-bg-elev: #ffffff;
-    --color-bg-soft: #f8fafe;
-    --color-bg-muted: #eef2f9;
-    --color-border: #dde4ef;
-    --color-border-strong: #c8d2e2;
+    /* Light theme: softer canvas, no pure white chrome, borders you can actually see */
+    --color-bg: #e4e9f2;
+    --color-bg-elev: #f5f7fb;
+    --color-bg-soft: #e9edf6;
+    --color-bg-muted: #dde3ef;
+    --color-border: #b4c0d4;
+    --color-border-strong: #8f9eb8;
     --color-text: #0f172a;
     --color-text-muted: #5b6b85;
     --color-text-subtle: #8392ab;
@@ -19,8 +20,8 @@
     --color-info: #0ea5e9;
     --color-highlight-violet: #8a7bff;
     --color-highlight-blue: #5699ff;
-    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 1px rgba(15, 23, 42, 0.03);
-    --shadow-md: 0 4px 14px rgba(15, 23, 42, 0.06);
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.07), 0 2px 8px rgba(15, 23, 42, 0.05);
+    --shadow-md: 0 6px 20px rgba(15, 23, 42, 0.09);
     --shadow-glow: 0 0 0 1px rgba(79, 70, 229, 0.18);
     --radius-sm: 8px;
     --radius-md: 12px;

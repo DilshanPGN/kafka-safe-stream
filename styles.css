@@ -145,7 +145,7 @@ body {
 .brand {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 14px;
     padding: 4px 6px 8px;
 }
 
@@ -605,8 +605,8 @@ body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    background: linear-gradient(135deg, #fff, #e8edf7);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+    background: linear-gradient(135deg, var(--color-bg-elev), var(--color-bg-muted));
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
     transition: transform var(--transition);
 }
 
