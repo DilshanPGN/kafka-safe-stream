@@ -143,23 +143,51 @@ body {
 }
 
 .brand {
-    font-size: var(--ui-fs-brand);
-    font-weight: 800;
-    letter-spacing: 1.5px;
-    background: linear-gradient(135deg, var(--color-accent), #06b6d4);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    color: transparent;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     padding: 4px 6px 8px;
 }
 
+.brand-logo {
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    object-fit: cover;
+    background: #fff;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Dark mode request: invert logo colors black<->white. */
+body[data-theme="dark"] .brand-logo {
+    filter: invert(1);
+}
+
+.brand-text {
+    font-size: 2.05rem;
+    font-weight: 800;
+    letter-spacing: 0.9px;
+    color: var(--color-heading);
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    min-height: 34px;
+}
+
 #sidebar.collapsed .brand {
-    font-size: var(--ui-fs-brand-sm);
-    letter-spacing: 1px;
+    justify-content: center;
     padding: 2px 0 4px;
-    text-align: center;
     width: 100%;
+}
+
+#sidebar.collapsed .brand-text {
+    display: none;
+}
+
+#sidebar.collapsed .brand-logo {
+    width: 30px;
+    height: 30px;
 }
 
 .sidebar-collapse-toggle {
