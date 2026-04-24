@@ -157,9 +157,12 @@ const TOKEN_INSERT_OPTIONS = [
     { group: 'Finance', token: '{{$iban}}', label: 'IBAN' },
 ];
 
+const TOKEN_PLACEHOLDER =
+    /\{\{\s*\$([a-zA-Z]+)(?::([^}]{0,512}))?\s*\}\}/g;
+
 function expandTokens(text) {
     if (typeof text !== 'string' || text.length === 0) return text;
-    return text.replace(/\{\{\s*\$([a-zA-Z]+)(?::([^}]*))?\s*\}\}/g, (match, name, argString) => {
+    return text.replace(TOKEN_PLACEHOLDER, (match, name, argString) => {
         const handler = TOKENS[name];
         if (!handler) return match;
         const args = (argString || '').length
@@ -167,7 +170,10 @@ function expandTokens(text) {
             : null;
         try {
             return String(handler(args));
-        } catch (_) {
+        } catch (err) {
+            if (typeof console !== 'undefined' && console.debug) {
+                console.debug('[kss] token expansion failed', name, err);
+            }
             return match;
         }
     });

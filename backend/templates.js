@@ -22,6 +22,9 @@ function readAll() {
         const parsed = JSON.parse(raw);
         return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
+        if (typeof console !== 'undefined' && console.debug) {
+            console.debug('[kss] templates read failed', err);
+        }
         return [];
     }
 }

@@ -20,7 +20,7 @@
     <script src='codemirror/xml.min.js'></script>
     <script src='codemirror/placeholder.min.js'></script>
 </head>
-<body data-theme="dark">
+<body data-theme="dark" data-kss-unsafe-consumer-groups="false">
   <div id="loading-container">
       <span class="loader"></span>
   </div>
@@ -51,6 +51,41 @@
           </div>
       </div>
   </div>
+  <div id="kafka-auth-overlay" class="kafka-auth-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="kafka-auth-title">
+      <div class="kafka-auth-backdrop" data-kafka-auth-dismiss="1" aria-hidden="true"></div>
+      <div class="custom-alert prompt-modal kafka-auth-dialog">
+          <div class="custom-alert-content prompt-content">
+              <h3 id="kafka-auth-title">Kafka credentials</h3>
+              <p id="kafka-auth-context" class="kafka-auth-context"></p>
+              <p id="kafka-auth-error" class="kafka-auth-error"></p>
+              <div id="kafka-auth-group-password" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-password">Password</label>
+                  <input type="password" id="kafka-auth-password" autocomplete="current-password" />
+              </div>
+              <div id="kafka-auth-group-oauth" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-oauth">OAuth bearer access token</label>
+                  <textarea id="kafka-auth-oauth" rows="3" spellcheck="false" placeholder="Paste access token"></textarea>
+              </div>
+              <div id="kafka-auth-group-aws" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-aws-secret">AWS secret access key</label>
+                  <input type="password" id="kafka-auth-aws-secret" autocomplete="off" />
+                  <label for="kafka-auth-aws-session">Session token (optional)</label>
+                  <input type="password" id="kafka-auth-aws-session" autocomplete="off" />
+              </div>
+              <div id="kafka-auth-group-ssl" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-ssl-pass">TLS client key passphrase (optional)</label>
+                  <input type="password" id="kafka-auth-ssl-pass" autocomplete="off" />
+              </div>
+              <label class="kafka-auth-remember"><input type="checkbox" id="kafka-auth-remember" checked /> Remember for this environment (encrypted when the OS supports it)</label>
+              <div class="kafka-auth-actions">
+                  <button type="button" id="kafka-auth-clear-saved" class="btn-secondary">Clear saved secrets</button>
+                  <span class="kafka-auth-actions-spacer"></span>
+                  <button type="button" id="kafka-auth-cancel" class="btn-secondary">Cancel</button>
+                  <button type="button" id="kafka-auth-submit" class="btn-primary">Connect</button>
+              </div>
+          </div>
+      </div>
+  </div>
   <div id="consumer-idle-overlay" class="consumer-idle-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="consumer-idle-title">
       <div class="consumer-idle-backdrop" aria-hidden="true"></div>
       <div id="consumer-idle-dialog" class="custom-alert prompt-modal consumer-idle-modal">
@@ -68,7 +103,10 @@
   <div id="container">
       <aside id="sidebar">
           <div class="sidebar-header">
-              <div class="brand">KSS</div>
+              <div class="brand" title="Kafka Safe Stream">
+                  <img src="./kss_logo.png" alt="KSS logo" class="brand-logo" />
+                  <span class="brand-text">KSS</span>
+              </div>
               <button id="sidebarCollapseToggle" class="sidebar-collapse-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar" aria-pressed="false">
                   <svg class="sidebar-collapse-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                       <path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -141,21 +179,26 @@
                           <option value="xml">XML</option>
                           <option value="text">Plain text</option>
                       </select>
-                      <div class="template-toolbar">
-                          <label class="topic-label" for="templateSelect">Template</label>
-                          <select id="templateSelect">
-                              <option value="">— select template —</option>
-                          </select>
-                          <button id="loadTemplateButton" class="btn-secondary">Load</button>
-                          <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
-                          <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
-                          <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
-                          <div class="token-picker-wrapper">
-                              <select id="tokenInsertSelect" title="Insert random token">
-                                  <option value="">Insert token…</option>
-                              </select>
+                      <details class="producer-template-details">
+                          <summary class="producer-template-summary">Templates</summary>
+                          <div class="producer-template-details-body">
+                              <div class="template-toolbar">
+                                  <label class="topic-label" for="templateSelect">Template</label>
+                                  <select id="templateSelect">
+                                      <option value="">— select template —</option>
+                                  </select>
+                                  <button id="loadTemplateButton" class="btn-secondary">Load</button>
+                                  <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
+                                  <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
+                                  <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
+                                  <div class="token-picker-wrapper">
+                                      <select id="tokenInsertSelect" title="Insert random token">
+                                          <option value="">Insert token…</option>
+                                      </select>
+                                  </div>
+                              </div>
                           </div>
-                      </div>
+                      </details>
                   </div>
                   <div class="options-section" id="optionsConsumerSection">
                       <h4 class="options-subheading">Consumer</h4>
@@ -170,11 +213,24 @@
                                   </select>
                               </label>
                           </div>
-                          <div class="control-row options-row--basic-hide">
-                              <span class="control-label">Start from</span>
-                              <div class="radio-group" id="startModeGroup">
-                                  <label><input type="radio" name="startMode" value="latest" checked> Now (latest)</label>
-                                  <label><input type="radio" name="startMode" value="earliest"> Beginning</label>
+                          <div class="control-row options-row--basic-hide consumer-start-from-row">
+                              <div class="start-from-label-wrap">
+                                  <div class="start-from-label-row">
+                                      <span class="control-label" id="startFromGroupLabel">Start from</span>
+                                      <button type="button" class="field-help-trigger" id="consumerStartModeHelpBtn" aria-label="Help: Start from options" aria-expanded="false" aria-controls="consumerStartModeHelpTooltip">
+                                          <svg class="field-help-trigger__icon" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                              <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+                                              <path d="M9.75 9.75a2.25 2.25 0 1 1 3.75 1.688c-.697.523-1.5 1.012-1.5 1.812V14M12 17h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+                                          </svg>
+                                      </button>
+                                  </div>
+                                  <div id="consumerStartModeHelpTooltip" class="consumer-start-mode-tooltip" role="tooltip" hidden>
+                                      <p class="consumer-start-mode-tooltip__text">“Now (latest)” only delivers messages produced <em>after</em> you start consuming. “Beginning” applies when the consumer group has <em>no</em> committed offsets; otherwise Kafka resumes from the last commit—use a <strong>new consumer group</strong> name (or reset offsets in Consumer lag) to read older data again.</p>
+                                  </div>
+                              </div>
+                              <div class="radio-group" id="startModeGroup" role="radiogroup" aria-labelledby="startFromGroupLabel">
+                                  <label><input type="radio" name="startMode" value="latest"> Now (latest)</label>
+                                  <label><input type="radio" name="startMode" value="earliest" checked> Beginning</label>
                                   <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
                               </div>
                           </div>
@@ -284,13 +340,11 @@
               </div>
               <div id="consumerLagContainer">
                   <div class="panel-heading">Consumer groups &amp; lag</div>
-                  <p class="lag-hint">Pick a topic, then load committed offsets for every consumer group in the cluster. Only groups with at least one committed offset on this topic are listed. Large clusters may take a while.</p>
+                  <p class="lag-hint">Pick a topic, then load committed offsets for every consumer group in the cluster. Only groups with at least one committed offset on this topic are listed. Large clusters may take a while. Resetting offsets or deleting groups is hidden by default; enable only by setting <code>allowedUnsafeOperations</code> to <code>true</code> for this environment in the config JSON (file or Setup → Advanced → edit JSON).</p>
                   <div class="lag-toolbar">
                       <label class="topic-label" for="lagTopicSelect">Topic</label>
                       <select id="lagTopicSelect"></select>
                       <button id="lagLoadButton" type="button" class="btn-primary">Load</button>
-                      <button id="lagResetAllButton" type="button" class="btn-secondary lag-reset-all-button lag-toolbar-advanced" disabled>Reset all shown groups to latest</button>
-                      <button id="lagDeleteAllButton" type="button" class="btn-danger lag-delete-all-button lag-toolbar-advanced" disabled>Delete all listed groups</button>
                   </div>
                   <div id="lagStatus" class="lag-status"></div>
                   <div id="lagTableWrapper" class="topics-table-wrapper">

@@ -2,17 +2,18 @@ const { ipcRenderer } = require('electron');
 const {
     createKafkaClient,
     produceMessage,
+    disconnectProducer,
     stopConsuming,
     consumeMessages,
     getTopicsAndPartitions,
     getTopicOffsets,
     getConsumerLagOverview,
     resetConsumerGroupOffsetsToLatest,
-    resetConsumerGroupsOffsetsToLatest,
     deleteConsumerGroups,
     appendOffsetResetAudit,
     getClusterMetadata,
 } = require('./backend/kafka');
+const { normalizeConnection, connectionFingerprint, isKafkaAuthError } = require('./backend/kafkaConnection');
 const templatesApi = require('./backend/templates');
 const { expandTokens, TOKEN_INSERT_OPTIONS } = require('./backend/randomTokens');
 const path = require('path');
@@ -71,6 +72,12 @@ const THEME_STORAGE_KEY = 'kss-theme';
 const APP_MODE_STORAGE_KEY = 'kss-app-mode';
 const PREFS_PATH = path.join(os.homedir(), '.kss', 'preferences.json');
 
+function logDebug(context, err) {
+    if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+        console.debug(`[kss] ${context}`, err);
+    }
+}
+
 const PAYLOAD_FORMATS = {
     json: { id: 'json', label: 'JSON', cmMode: { name: 'javascript', json: true } },
     xml: { id: 'xml', label: 'XML', cmMode: 'xml' },
@@ -97,7 +104,11 @@ let consumedMessages = [];
 let selectedTemplateId = '';
 let producerFormat = DEFAULT_FORMAT;
 let consumerFormat = DEFAULT_FORMAT;
-let kafkaClientCache = { env: null, client: null };
+let kafkaClientCache = { key: null, client: null };
+/** Session-only credential fields per env (override encrypted store). */
+let sessionSecretsByEnv = {};
+/** Bumped when secrets change so the Kafka client is rebuilt. */
+let secretEpochByEnv = {};
 let rendererInitialized = false;
 let pendingConfigUpdate = null;
 window.refreshIntervalId = null;
@@ -108,6 +119,19 @@ let lagResetInFlight = false;
 let consumerTableView = false;
 /** Last rows rendered in the consumer table (for “View payload” window). */
 let lastConsumerTableFilteredSnapshot = [];
+
+function isUnsafeConsumerGroupOpsAllowed() {
+    if (!envConfig || !activeEnv) return false;
+    const env = envConfig[activeEnv];
+    return Boolean(env && env.allowedUnsafeOperations === true);
+}
+
+function syncUnsafeConsumerGroupBodyAttr() {
+    document.body.setAttribute(
+        'data-kss-unsafe-consumer-groups',
+        isUnsafeConsumerGroupOpsAllowed() ? 'true' : 'false',
+    );
+}
 let consumerTablePayloadClickBound = false;
 let consumerBlurIdleTimerId = null;
 let consumerIdleCountdownIntervalId = null;
@@ -121,7 +145,9 @@ function loadPreferences() {
             const raw = fs.readFileSync(PREFS_PATH, 'utf8');
             return JSON.parse(raw) || {};
         }
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('preferences read', err);
+    }
     return {};
 }
 
@@ -209,13 +235,245 @@ function persistLastEnv(envId) {
     savePreferences(prefs);
 }
 
+function invalidateKafkaClientCache() {
+    const prev = kafkaClientCache.client;
+    kafkaClientCache = { key: null, client: null };
+    if (prev) {
+        disconnectProducer(prev).catch((err) => logDebug('disconnectProducer', err));
+    }
+}
+
+function bumpSecretEpoch(envId) {
+    if (!envId) return;
+    secretEpochByEnv[envId] = (secretEpochByEnv[envId] || 0) + 1;
+}
+
+async function mergeKafkaSecretsForEnv(envId) {
+    let disk = {};
+    try {
+        const d = await ipcRenderer.invoke('kss-credentials:get', { envId });
+        if (d && typeof d === 'object') disk = { ...d };
+    } catch (err) {
+        logDebug('kss-credentials:get', err);
+    }
+    const sess = sessionSecretsByEnv[envId] || {};
+    return { ...disk, ...sess };
+}
+
+function hasAnyKafkaSecret(secrets) {
+    if (!secrets || typeof secrets !== 'object') return false;
+    return Boolean(
+        secrets.password
+        || secrets.oauthAccessToken
+        || secrets.awsSecretAccessKey
+        || secrets.sslKeyPassphrase,
+    );
+}
+
 async function getKafkaClient() {
-    if (kafkaClientCache.env === activeEnv && kafkaClientCache.client) {
+    const env = envConfig[activeEnv];
+    if (!env) {
+        throw new Error('No environment selected');
+    }
+    const connection = normalizeConnection(env.connection);
+    const secrets = await mergeKafkaSecretsForEnv(activeEnv);
+    const hasSecret = hasAnyKafkaSecret(secrets);
+    const epoch = secretEpochByEnv[activeEnv] || 0;
+    const fp = `${activeEnv}|${epoch}|${connectionFingerprint(connection, env.brokers, hasSecret)}`;
+    if (kafkaClientCache.key === fp && kafkaClientCache.client) {
         return kafkaClientCache.client;
     }
-    const client = await createKafkaClient(envConfig[activeEnv].brokers);
-    kafkaClientCache = { env: activeEnv, client };
+    const client = createKafkaClient(env.brokers, { connection, secrets });
+    kafkaClientCache = { key: fp, client };
     return client;
+}
+
+/**
+ * @param {{ topicLabel?: string, error: Error, connection: ReturnType<typeof normalizeConnection> }} args
+ * @returns {Promise<null|{ remember: boolean, password?: string, oauthAccessToken?: string, awsSecretAccessKey?: string, awsSessionToken?: string, sslKeyPassphrase?: string }>}
+ */
+function showKafkaCredentialModal(args) {
+    const { topicLabel, error, connection } = args;
+    return new Promise((resolve) => {
+        const overlay = document.getElementById('kafka-auth-overlay');
+        const ctx = document.getElementById('kafka-auth-context');
+        const errEl = document.getElementById('kafka-auth-error');
+        const gPass = document.getElementById('kafka-auth-group-password');
+        const gOauth = document.getElementById('kafka-auth-group-oauth');
+        const gAws = document.getElementById('kafka-auth-group-aws');
+        const gSsl = document.getElementById('kafka-auth-group-ssl');
+        const inPass = document.getElementById('kafka-auth-password');
+        const inOauth = document.getElementById('kafka-auth-oauth');
+        const inAwsSec = document.getElementById('kafka-auth-aws-secret');
+        const inAwsTok = document.getElementById('kafka-auth-aws-session');
+        const inSsl = document.getElementById('kafka-auth-ssl-pass');
+        const remember = document.getElementById('kafka-auth-remember');
+        const btnOk = document.getElementById('kafka-auth-submit');
+        const btnCancel = document.getElementById('kafka-auth-cancel');
+        const btnClear = document.getElementById('kafka-auth-clear-saved');
+        const backdrop = overlay && overlay.querySelector('[data-kafka-auth-dismiss]');
+        if (!overlay || !ctx || !errEl || !btnOk || !btnCancel) {
+            resolve(null);
+            return;
+        }
+
+        const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+            || connection.securityProtocol === 'SASL_SSL';
+        const mech = connection.saslMechanism;
+        const showPass = useSasl && (mech === 'plain' || mech === 'scram-sha-256' || mech === 'scram-sha-512');
+        const showOauth = useSasl && mech === 'oauthbearer';
+        const showAws = useSasl && mech === 'aws';
+        const showSsl = Boolean(connection.keyFile && String(connection.keyFile).trim());
+
+        ctx.textContent = topicLabel
+            ? `The cluster rejected the connection while using topic "${topicLabel}". Enter credentials for environment "${activeEnv}".`
+            : `The cluster rejected the connection. Enter credentials for environment "${activeEnv}".`;
+        errEl.textContent = (error && error.message) ? String(error.message) : 'Authentication or TLS error';
+
+        gPass.style.display = showPass ? 'block' : 'none';
+        gOauth.style.display = showOauth ? 'block' : 'none';
+        gAws.style.display = showAws ? 'block' : 'none';
+        gSsl.style.display = showSsl ? 'block' : 'none';
+
+        inPass.value = '';
+        inOauth.value = '';
+        inAwsSec.value = '';
+        inAwsTok.value = '';
+        inSsl.value = '';
+        remember.checked = true;
+
+        const cleanup = (value) => {
+            overlay.style.display = 'none';
+            btnOk.removeEventListener('click', onOk);
+            btnCancel.removeEventListener('click', onCancel);
+            if (btnClear) btnClear.removeEventListener('click', onClear);
+            if (backdrop) backdrop.removeEventListener('click', onCancel);
+            resolve(value);
+        };
+
+        const onCancel = () => cleanup(null);
+
+        const onClear = async () => {
+            try {
+                await ipcRenderer.invoke('kss-credentials:clear', { envId: activeEnv });
+            } catch (err) {
+                logDebug('kss-credentials:clear', err);
+            }
+            delete sessionSecretsByEnv[activeEnv];
+            bumpSecretEpoch(activeEnv);
+            invalidateKafkaClientCache();
+            showAlert('Saved secrets', 'Stored credentials for this environment were cleared.');
+        };
+
+        const onOk = () => {
+            const out = { remember: remember.checked };
+            if (showPass) out.password = String(inPass.value || '');
+            if (showOauth) out.oauthAccessToken = String(inOauth.value || '').trim();
+            if (showAws) {
+                out.awsSecretAccessKey = String(inAwsSec.value || '');
+                out.awsSessionToken = String(inAwsTok.value || '');
+            }
+            if (showSsl) out.sslKeyPassphrase = String(inSsl.value || '');
+            if (showPass && !out.password) {
+                showAlert('Credentials', 'Password is required.');
+                return;
+            }
+            if (showOauth && !out.oauthAccessToken) {
+                showAlert('Credentials', 'Access token is required.');
+                return;
+            }
+            if (showAws && !out.awsSecretAccessKey) {
+                showAlert('Credentials', 'AWS secret access key is required.');
+                return;
+            }
+            cleanup(out);
+        };
+
+        btnOk.addEventListener('click', onOk);
+        btnCancel.addEventListener('click', onCancel);
+        if (btnClear) btnClear.addEventListener('click', onClear);
+        if (backdrop) backdrop.addEventListener('click', onCancel);
+
+        overlay.style.display = 'flex';
+        setTimeout(() => {
+            if (showPass) inPass.focus();
+            else if (showOauth) inOauth.focus();
+            else if (showAws) inAwsSec.focus();
+            else if (showSsl) inSsl.focus();
+            else btnOk.focus();
+        }, 50);
+    });
+}
+
+async function persistKafkaSecretsFromModal(envId, formPayload, remember) {
+    const fp = { ...(formPayload || {}) };
+    delete fp.remember;
+    if (!remember) {
+        sessionSecretsByEnv[envId] = { ...(sessionSecretsByEnv[envId] || {}), ...fp };
+        return;
+    }
+    let disk = {};
+    try {
+        const d = await ipcRenderer.invoke('kss-credentials:get', { envId });
+        if (d && typeof d === 'object') disk = { ...d };
+    } catch (err) {
+        logDebug('kss-credentials:get merge', err);
+    }
+    const merged = { ...disk, ...fp };
+    await ipcRenderer.invoke('kss-credentials:set', { envId, payload: merged });
+    delete sessionSecretsByEnv[envId];
+}
+
+/**
+ * Run a Kafka operation; on auth/TLS failure prompt for secrets and retry (bounded).
+ * @param {string} topicLabel
+ * @param {(kafka: import('kafkajs').Kafka) => Promise<unknown>} fn
+ */
+async function withKafkaAuthRecovery(topicLabel, fn) {
+    const maxRounds = 3;
+    for (let round = 0; round < maxRounds; round += 1) {
+        try {
+            const kafka = await getKafkaClient();
+            return await fn(kafka);
+        } catch (err) {
+            if (!isKafkaAuthError(err) || !activeEnv || !envConfig[activeEnv]) {
+                throw err;
+            }
+            const connection = normalizeConnection(envConfig[activeEnv].connection);
+            const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+                || connection.securityProtocol === 'SASL_SSL';
+            const mech = connection.saslMechanism;
+            const needModal = (useSasl && mech !== 'none')
+                || (Boolean(connection.keyFile && String(connection.keyFile).trim()));
+            if (!needModal) {
+                throw err;
+            }
+            const form = await showKafkaCredentialModal({ topicLabel, error: err, connection });
+            if (!form) throw err;
+            await persistKafkaSecretsFromModal(activeEnv, form, form.remember);
+            bumpSecretEpoch(activeEnv);
+            invalidateKafkaClientCache();
+        }
+    }
+    throw new Error('Kafka authentication failed after multiple attempts.');
+}
+
+async function disconnectAdminQuiet(admin) {
+    try {
+        await admin.disconnect();
+    } catch (err) {
+        logDebug('admin.disconnect', err);
+    }
+}
+
+/** Minimal broker auth check (SASL/TLS) before starting a long-lived consumer. */
+async function pingKafkaAuth(kafka) {
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+    } finally {
+        await disconnectAdminQuiet(admin);
+    }
 }
 
 function applyTheme(theme) {
@@ -231,14 +489,18 @@ function applyTheme(theme) {
     }
     try {
         localStorage.setItem(THEME_STORAGE_KEY, targetTheme);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage theme', err);
+    }
 }
 
 function initializeThemeToggle() {
     let savedTheme = 'dark';
     try {
         savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage theme read', err);
+    }
     applyTheme(savedTheme);
     const themeToggle = document.getElementById('themeToggle');
     if (themeToggle) {
@@ -252,7 +514,8 @@ function loadAppMode() {
     try {
         const stored = window.localStorage.getItem(APP_MODE_STORAGE_KEY);
         appMode = stored === 'basic' ? 'basic' : 'advanced';
-    } catch (_) {
+    } catch (err) {
+        logDebug('localStorage app mode', err);
         appMode = 'advanced';
     }
 }
@@ -317,7 +580,9 @@ function setAppMode(next) {
     appMode = nextMode;
     try {
         window.localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage app mode write', err);
+    }
     if (appMode === 'basic' && !['producer', 'consumer', 'consumerLag'].includes(activeMethod)) {
         activeMethod = 'producer';
     }
@@ -376,15 +641,20 @@ function renderConsumerTabBlink(show) {
     statusNode.textContent = show ? '●' : '';
 }
 
-function applyActiveMethodLayout() {
-    const hideTopicsChrome = activeMethod === 'topicsBrowser'
+function isTopicsBrowserChromeHidden() {
+    return activeMethod === 'topicsBrowser'
         || activeMethod === 'consumerLag'
         || activeMethod === 'clusterInfo';
+}
+
+function applyRibbonAndOptionsChrome(hideTopicsChrome) {
     const ribbon = document.getElementById('summaryCards');
     if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
     const optionsSection = document.getElementById('topics');
     if (optionsSection) optionsSection.style.display = hideTopicsChrome ? 'none' : '';
+}
 
+function applyProducerConsumerOptionSections() {
     const producerOptionsSection = document.getElementById('optionsProducerSection');
     const consumerOptionsSection = document.getElementById('optionsConsumerSection');
     if (producerOptionsSection) {
@@ -393,17 +663,26 @@ function applyActiveMethodLayout() {
     if (consumerOptionsSection) {
         consumerOptionsSection.style.display = activeMethod === 'consumer' ? '' : 'none';
     }
+}
 
+function applySummaryEnvGroupCards(hideTopicsChrome) {
     const envCard = document.getElementById('summaryCardActiveEnv');
     const groupCard = document.getElementById('summaryCardConsumerGroup');
     if (hideTopicsChrome) {
         if (envCard) envCard.style.display = '';
         if (groupCard) groupCard.style.display = '';
-    } else {
-        const hideActiveEnv = activeMethod === 'producer' || activeMethod === 'consumer';
-        if (envCard) envCard.style.display = hideActiveEnv ? 'none' : '';
-        if (groupCard) groupCard.style.display = activeMethod === 'producer' ? 'none' : '';
+        return;
     }
+    const hideActiveEnv = activeMethod === 'producer' || activeMethod === 'consumer';
+    if (envCard) envCard.style.display = hideActiveEnv ? 'none' : '';
+    if (groupCard) groupCard.style.display = activeMethod === 'producer' ? 'none' : '';
+}
+
+function applyActiveMethodLayout() {
+    const hideTopicsChrome = isTopicsBrowserChromeHidden();
+    applyRibbonAndOptionsChrome(hideTopicsChrome);
+    applyProducerConsumerOptionSections();
+    applySummaryEnvGroupCards(hideTopicsChrome);
 }
 
 function updateSummaryCards() {
@@ -422,11 +701,14 @@ function updateSummaryCards() {
         activeEnvName.textContent = env.label || activeEnv;
     }
 
-    const selectedTopicLabel = activeMethod === 'consumer'
-        ? consumerTopic
-        : (activeMethod === 'consumerLag'
-            ? lagTopic
-            : (activeMethod === 'clusterInfo' ? '' : producerTopic));
+    let selectedTopicLabel = '';
+    if (activeMethod === 'consumer') {
+        selectedTopicLabel = consumerTopic;
+    } else if (activeMethod === 'consumerLag') {
+        selectedTopicLabel = lagTopic;
+    } else if (activeMethod !== 'clusterInfo') {
+        selectedTopicLabel = producerTopic;
+    }
     activeTopicName.textContent = selectedTopicLabel || '-';
     if (activeGroupName) activeGroupName.textContent = consumerGroup || '-';
 }
@@ -449,6 +731,10 @@ async function loadConfig() {
             if (!valid) {
                 throw new Error('Invalid configuration format');
             }
+            Object.keys(envConfig).forEach((envId) => {
+                const e = envConfig[envId];
+                e.connection = normalizeConnection(e.connection);
+            });
             return envConfig;
         } catch (error) {
             console.error('Error reading or parsing the config file:', error);
@@ -521,7 +807,8 @@ function validatePayload(format, text) {
         try {
             JSON.parse(raw);
             return true;
-        } catch (_) {
+        } catch (err) {
+            logDebug('validatePayload json', err);
             return false;
         }
     }
@@ -612,7 +899,9 @@ function applyProducerFormat(format, { skipStorage } = {}) {
     if (!skipStorage) {
         try {
             window.localStorage.setItem(PRODUCER_FORMAT_STORAGE_KEY, producerFormat);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage producer format', err);
+        }
     }
 }
 
@@ -626,7 +915,9 @@ function applyConsumerFormat(format, { skipStorage } = {}) {
     if (!skipStorage) {
         try {
             window.localStorage.setItem(CONSUMER_FORMAT_STORAGE_KEY, consumerFormat);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage consumer format', err);
+        }
     }
 }
 
@@ -700,7 +991,8 @@ function getFilteredConsumedMessages() {
             try {
                 const re = new RegExp(term, 'i');
                 filtered = consumedMessages.filter((m) => re.test(m.value) || re.test(String(m.key || '')));
-            } catch (_) {
+            } catch (err) {
+                logDebug('consumer filter regex', err);
                 filtered = consumedMessages;
             }
         } else {
@@ -719,7 +1011,8 @@ function formatPayloadForViewer(raw, formatId) {
     if (id === 'text') return text;
     try {
         return formatPayload(id, text);
-    } catch (_) {
+    } catch (err) {
+        logDebug('formatPayloadForViewer', err);
         return text;
     }
 }
@@ -739,20 +1032,24 @@ function openConsumerMessagePayloadWindow(msg) {
             formatId: fmtId,
         }));
     } catch (err) {
+        logDebug('sessionStorage set viewer payload', err);
         showAlert('View payload', 'Could not store payload for the viewer (too large or storage unavailable).');
         return;
     }
     let url;
     try {
         url = new URL('payload-viewer.html', window.location.href).href;
-    } catch (_) {
+    } catch (err) {
+        logDebug('payload-viewer URL', err);
         url = 'payload-viewer.html';
     }
     const w = window.open(url, '_blank', 'width=920,height=720,scrollbars=yes');
     if (!w) {
         try {
             sessionStorage.removeItem(PAYLOAD_VIEWER_STORAGE_KEY);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('sessionStorage remove viewer key', err);
+        }
         showAlert('View payload', 'Could not open a new window (popup blocker or OS restriction).');
     }
 }
@@ -807,7 +1104,9 @@ function applyConsumerSurfaceVisibility() {
         if (consumer) {
             try {
                 consumer.refresh();
-            } catch (_) { /* ignore */ }
+            } catch (err) {
+                logDebug('consumer.refresh', err);
+            }
         }
     }
 }
@@ -850,9 +1149,12 @@ function renderConsumerTable(filtered) {
         const valDisp = trunc(valStr, valuePreviewMax);
         const keyTitle = keyDisp.title ? ` title="${keyDisp.title}"` : '';
         const valueHasContent = valStr.length > 0;
-        const valueTitleAttr = valDisp.title
-            ? ` title="${valDisp.title}"`
-            : (valueHasContent ? ' title="Open full payload in new window (click or Enter)"' : '');
+        let valueTitleAttr = '';
+        if (valDisp.title) {
+            valueTitleAttr = ` title="${valDisp.title}"`;
+        } else if (valueHasContent) {
+            valueTitleAttr = ' title="Open full payload in new window (click or Enter)"';
+        }
         const valueCellAttrs = valueHasContent
             ? ` class="consumer-msg-value-cell consumer-msg-value-cell--openable" tabindex="0" role="button" aria-label="Open full payload in new window"${valueTitleAttr}`
             : ' class="consumer-msg-value-cell"';
@@ -887,7 +1189,9 @@ function formatConsumedEntry(msg) {
     if (consumerFormat === 'json') {
         try {
             body = JSON.stringify(JSON.parse(msg.value), null, 2);
-        } catch (_) { /* keep as-is */ }
+        } catch (err) {
+            logDebug('format consumed json', err);
+        }
     }
     const metaLine = `partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
         (msg.key ? ` key=${msg.key}` : '');
@@ -1031,9 +1335,12 @@ async function handleExportConsumed() {
     const format = await showExportFormatDialog();
     if (!format || !['json', 'jsonl', 'csv'].includes(format)) return;
 
-    const defaultPath = format === 'json' ? 'consumed-messages.json'
-        : format === 'jsonl' ? 'consumed-messages.jsonl'
-            : 'consumed-messages.csv';
+    let defaultPath = 'consumed-messages.csv';
+    if (format === 'json') {
+        defaultPath = 'consumed-messages.json';
+    } else if (format === 'jsonl') {
+        defaultPath = 'consumed-messages.jsonl';
+    }
     const result = await ipcRenderer.invoke('save-consumed-export', {
         defaultPath,
         filters: [
@@ -1265,8 +1572,8 @@ async function stopConsumingAndResetUI() {
     resetConsumerIdleWatchdog();
     try {
         await stopConsuming();
-    } catch (_) {
-        /* ignore */
+    } catch (err) {
+        logDebug('stopConsuming', err);
     }
     resetConsumeUIState();
 }
@@ -1332,16 +1639,17 @@ async function refreshPartitions(topicName) {
     select.appendChild(allOpt);
     if (!topicName || !envConfig || !envConfig[activeEnv]) return;
     try {
-        const kafka = await getKafkaClient();
-        const offsets = await getTopicOffsets(kafka, topicName);
-        offsets
-            .sort((a, b) => Number(a.partition) - Number(b.partition))
-            .forEach((o) => {
-                const opt = document.createElement('option');
-                opt.value = String(o.partition);
-                opt.textContent = `Partition ${o.partition} (low=${o.low}, high=${o.high})`;
-                select.appendChild(opt);
-            });
+        await withKafkaAuthRecovery(topicName || '', async (kafka) => {
+            const offsets = await getTopicOffsets(kafka, topicName);
+            offsets
+                .sort((a, b) => Number(a.partition) - Number(b.partition))
+                .forEach((o) => {
+                    const opt = document.createElement('option');
+                    opt.value = String(o.partition);
+                    opt.textContent = `Partition ${o.partition} (low=${o.low}, high=${o.high})`;
+                    select.appendChild(opt);
+                });
+        });
     } catch (err) {
         console.warn('Could not load partitions for topic', topicName, err);
     }
@@ -1355,8 +1663,9 @@ async function loadTopicsBrowser(forceRefresh = false) {
     showLoading();
     try {
         if (forceRefresh || topicsCache.length === 0) {
-            const kafka = await getKafkaClient();
-            topicsCache = await getTopicsAndPartitions(kafka);
+            await withKafkaAuthRecovery('', async (kafka) => {
+                topicsCache = await getTopicsAndPartitions(kafka);
+            });
         }
         renderTopicsTable();
         if (countEl) countEl.textContent = `${topicsCache.length} topic${topicsCache.length === 1 ? '' : 's'}`;
@@ -1438,16 +1747,7 @@ function clearLagOverviewUI(message) {
 }
 
 function setLagResetControlsState() {
-    const bulkBtn = document.getElementById('lagResetAllButton');
-    const bulkDelBtn = document.getElementById('lagDeleteAllButton');
-    const hasGroups = !!(lagOverviewData && Array.isArray(lagOverviewData.groups) && lagOverviewData.groups.length);
     const busy = lagResetInFlight;
-    if (bulkBtn) {
-        bulkBtn.disabled = busy || !hasGroups;
-    }
-    if (bulkDelBtn) {
-        bulkDelBtn.disabled = busy || !hasGroups;
-    }
     document.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
         btn.disabled = busy;
     });
@@ -1456,11 +1756,10 @@ function setLagResetControlsState() {
     });
 }
 
-async function confirmLagReset(scope, topic, groupIds) {
-    const scopeLabel = scope === 'bulk' ? 'all shown groups' : `group "${groupIds[0]}"`;
+async function confirmLagReset(topic, groupId) {
     const confirmed = await showConfirm(
         'Reset offsets to latest?',
-        `You are about to reset committed offsets for ${scopeLabel} on topic "${topic}". This can immediately clear lag. Active consumers may commit different offsets again after this action. Continue?`
+        `You are about to reset committed offsets for group "${groupId}" on topic "${topic}". This can immediately clear lag. Active consumers may commit different offsets again after this action. Continue?`
     );
     if (!confirmed) return null;
 
@@ -1478,48 +1777,48 @@ async function confirmLagReset(scope, topic, groupIds) {
     return reason;
 }
 
-async function confirmLagDelete(scope, topic, groupIds) {
-    const scopeLabel = scope === 'bulk'
-        ? `all ${groupIds.length} group(s) currently listed for topic "${topic}"`
-        : `consumer group "${groupIds[0]}"`;
+async function confirmLagDelete(groupId) {
     return showConfirm(
-        'Delete consumer group(s)?',
-        `This will permanently remove ${scopeLabel} from the cluster (group metadata and committed offsets). Kafka only allows deletion when a group has no active members (state Empty or Dead). Stop any consumers using this group first. This cannot be undone. Continue?`
+        'Delete consumer group?',
+        `This will permanently remove consumer group "${groupId}" from the cluster (group metadata and committed offsets). Kafka only allows deletion when a group has no active members (state Empty or Dead). Stop any consumers using this group first. This cannot be undone. Continue?`
     );
 }
 
-async function handleLagDelete(scope, groupIds) {
+async function handleLagDelete(groupId) {
     const topic = lagTopic;
     if (!topic) {
         showAlert('Delete consumer group', 'Select a topic first.');
         return;
     }
-    const targets = [...new Set((groupIds || []).filter(Boolean))];
-    if (!targets.length) {
-        showAlert('Delete consumer group', 'No consumer groups selected.');
+    if (!isUnsafeConsumerGroupOpsAllowed()) {
+        showAlert(
+            'Not available',
+            'Deleting consumer groups is disabled for this environment. Set "allowedUnsafeOperations" to true in the config JSON (~/.kss/.config) or in Setup → Advanced → edit JSON.',
+        );
         return;
     }
-    const confirmed = await confirmLagDelete(scope, topic, targets);
+    if (!groupId) {
+        showAlert('Delete consumer group', 'No consumer group selected.');
+        return;
+    }
+    const confirmed = await confirmLagDelete(groupId);
     if (!confirmed) return;
 
     lagResetInFlight = true;
     setLagResetControlsState();
     showLoading();
     try {
-        const kafka = await getKafkaClient();
-        const details = await deleteConsumerGroups(kafka, { groupIds: targets });
+        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+            deleteConsumerGroups(kafka, { groupIds: [groupId] }));
         if (details.failureCount === 0) {
-            showAlert('Consumer group deleted', `Deleted ${details.successCount} group(s).`);
-        } else if (details.successCount > 0) {
-            const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
-            showAlert('Delete consumer groups (partial)', `Removed ${details.successCount} group(s); ${details.failureCount} failed. Example: ${firstErr}`);
+            showAlert('Consumer group deleted', 'Deleted 1 group.');
         } else {
             const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
-            showAlert('Delete consumer groups failed', firstErr);
+            showAlert('Delete consumer group failed', firstErr);
         }
         await loadConsumerLagOverview();
     } catch (err) {
-        showAlert('Delete consumer groups failed', err.message || String(err));
+        showAlert('Delete consumer group failed', err.message || String(err));
     } finally {
         lagResetInFlight = false;
         hideLoading();
@@ -1527,24 +1826,31 @@ async function handleLagDelete(scope, groupIds) {
     }
 }
 
-async function handleLagReset(scope, groupIds) {
+async function handleLagReset(groupId) {
     const topic = lagTopic;
     if (!topic) {
         showAlert('Offset reset', 'Select a topic first.');
         return;
     }
-    const targets = [...new Set((groupIds || []).filter(Boolean))];
-    if (!targets.length) {
-        showAlert('Offset reset', 'No consumer groups available to reset.');
+    if (!isUnsafeConsumerGroupOpsAllowed()) {
+        showAlert(
+            'Not available',
+            'Resetting offsets to latest is disabled for this environment. Set "allowedUnsafeOperations" to true in the config JSON (~/.kss/.config) or in Setup → Advanced → edit JSON.',
+        );
         return;
     }
-    const reason = await confirmLagReset(scope, topic, targets);
+    if (!groupId) {
+        showAlert('Offset reset', 'No consumer group selected.');
+        return;
+    }
+    const reason = await confirmLagReset(topic, groupId);
     if (reason === null) return;
 
     const osUsername = (() => {
         try {
             return os.userInfo().username || process.env.USERNAME || process.env.USER || 'unknown';
-        } catch (_) {
+        } catch (err) {
+            logDebug('os.userInfo', err);
             return process.env.USERNAME || process.env.USER || 'unknown';
         }
     })();
@@ -1553,36 +1859,19 @@ async function handleLagReset(scope, groupIds) {
     setLagResetControlsState();
     showLoading();
     try {
-        const kafka = await getKafkaClient();
-        let outcome = 'success';
-        let details;
-
-        if (scope === 'bulk') {
-            details = await resetConsumerGroupsOffsetsToLatest(kafka, { topic, groupIds: targets });
-            if (details.failureCount > 0 && details.successCount > 0) outcome = 'partial';
-            if (details.failureCount > 0 && details.successCount === 0) outcome = 'failed';
-            if (outcome === 'success') {
-                showAlert('Offset reset', `Reset offsets to latest for ${details.successCount} group(s) on "${topic}".`);
-            } else if (outcome === 'partial') {
-                showAlert('Offset reset (partial)', `Reset succeeded for ${details.successCount} group(s), failed for ${details.failureCount}.`);
-            } else {
-                const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
-                showAlert('Offset reset failed', firstErr);
-            }
-        } else {
-            details = await resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId: targets[0] });
-            showAlert('Offset reset', `Reset offsets to latest for "${targets[0]}" on "${topic}".`);
-        }
+        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+            resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId }));
+        showAlert('Offset reset', `Reset offsets to latest for "${groupId}" on "${topic}".`);
 
         try {
             appendOffsetResetAudit({
-                scope,
+                scope: 'single',
                 topic,
-                groupIds: targets,
+                groupIds: [groupId],
                 operatorReason: reason,
                 osUsername,
                 activeEnv,
-                outcome,
+                outcome: 'success',
                 details,
             });
         } catch (auditErr) {
@@ -1625,6 +1914,85 @@ function populateLagTopicSelect() {
     };
 }
 
+function lagCommittedAndLagCells(pr) {
+    const committedCell = pr.committedDisplay === null ? '—' : escapeHtml(pr.committedDisplay);
+    const lagCell = pr.lag === null ? '—' : escapeHtml(String(pr.lag));
+    return { committedCell, lagCell };
+}
+
+function lagClientsCells(clientsStr, clientsShort) {
+    const clientsTitle = escapeHtml(clientsStr);
+    const clientsBody = clientsShort ? escapeHtml(clientsShort) : '—';
+    return { clientsTitle, clientsBody };
+}
+
+function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
+    const tr = document.createElement('tr');
+    const { committedCell, lagCell } = lagCommittedAndLagCells(pr);
+    const { clientsTitle, clientsBody } = lagClientsCells(clientsStr, clientsShort);
+    const unsafe = isUnsafeConsumerGroupOpsAllowed();
+    const actionCell = unsafe
+        ? `<td class="lag-action-cell lag-col-actions">
+                    <div class="lag-action-buttons">
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
+                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
+                    </div>
+                </td>`
+        : '<td class="lag-action-cell lag-col-actions" aria-hidden="true"></td>';
+    tr.innerHTML = `
+                <td class="topic-cell">${escapeHtml(g.groupId)}</td>
+                <td>${escapeHtml(String(g.state))}</td>
+                <td>${g.memberCount}</td>
+                <td class="lag-clients-cell" title="${clientsTitle}">${clientsBody}</td>
+                <td>${pr.partition}</td>
+                <td>${committedCell}</td>
+                <td>${escapeHtml(String(pr.logEnd))}</td>
+                <td>${lagCell}</td>
+                ${actionCell}
+            `;
+    body.appendChild(tr);
+}
+
+function appendLagOverviewRows(body, data) {
+    for (const g of data.groups) {
+        const clients = (g.members || []).map((m) => m.clientId || m.memberId).filter(Boolean);
+        const clientsStr = clients.join(', ');
+        const clientsShort = clientsStr.length > 48 ? `${clientsStr.slice(0, 45)}…` : clientsStr;
+        for (const pr of g.partitions) {
+            appendLagPartitionRow(body, g, pr, clientsStr, clientsShort);
+        }
+    }
+}
+
+function bindLagOverviewRowActions(body) {
+    body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-reset-group') || '');
+            } catch (err) {
+                logDebug('decode lag-reset-group', err);
+                return;
+            }
+            if (!groupId) return;
+            handleLagReset(groupId);
+        });
+    });
+    body.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-delete-group') || '');
+            } catch (err) {
+                logDebug('decode lag-delete-group', err);
+                return;
+            }
+            if (!groupId) return;
+            handleLagDelete(groupId);
+        });
+    });
+}
+
 function renderLagOverviewResult(data) {
     const body = document.getElementById('lagTableBody');
     const empty = document.getElementById('lagEmptyState');
@@ -1644,60 +2012,8 @@ function renderLagOverviewResult(data) {
 
     empty.style.display = 'none';
     body.innerHTML = '';
-
-    for (const g of data.groups) {
-        const clients = (g.members || []).map((m) => m.clientId || m.memberId).filter(Boolean);
-        const clientsStr = clients.join(', ');
-        const clientsShort = clientsStr.length > 48 ? `${clientsStr.slice(0, 45)}…` : clientsStr;
-        for (const pr of g.partitions) {
-            const tr = document.createElement('tr');
-            const committedCell = pr.committedDisplay === null ? '—' : escapeHtml(pr.committedDisplay);
-            const lagCell = pr.lag === null ? '—' : escapeHtml(String(pr.lag));
-            const clientsTitle = escapeHtml(clientsStr);
-            const clientsBody = clientsShort ? escapeHtml(clientsShort) : '—';
-            tr.innerHTML = `
-                <td class="topic-cell">${escapeHtml(g.groupId)}</td>
-                <td>${escapeHtml(String(g.state))}</td>
-                <td>${g.memberCount}</td>
-                <td class="lag-clients-cell" title="${clientsTitle}">${clientsBody}</td>
-                <td>${pr.partition}</td>
-                <td>${committedCell}</td>
-                <td>${escapeHtml(String(pr.logEnd))}</td>
-                <td>${lagCell}</td>
-                <td class="lag-action-cell lag-col-actions">
-                    <div class="lag-action-buttons">
-                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
-                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
-                    </div>
-                </td>
-            `;
-            body.appendChild(tr);
-        }
-    }
-    body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            let groupId = '';
-            try {
-                groupId = decodeURIComponent(btn.getAttribute('data-lag-reset-group') || '');
-            } catch (_) {
-                return;
-            }
-            if (!groupId) return;
-            handleLagReset('single', [groupId]);
-        });
-    });
-    body.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            let groupId = '';
-            try {
-                groupId = decodeURIComponent(btn.getAttribute('data-lag-delete-group') || '');
-            } catch (_) {
-                return;
-            }
-            if (!groupId) return;
-            handleLagDelete('single', [groupId]);
-        });
-    });
+    appendLagOverviewRows(body, data);
+    bindLagOverviewRowActions(body);
     setLagResetControlsState();
 }
 
@@ -1710,8 +2026,8 @@ async function loadConsumerLagOverview() {
     if (status) status.textContent = 'Loading…';
     showLoading();
     try {
-        const kafka = await getKafkaClient();
-        const data = await getConsumerLagOverview(kafka, lagTopic);
+        const data = await withKafkaAuthRecovery(lagTopic || '', async (kafka) =>
+            getConsumerLagOverview(kafka, lagTopic));
         renderLagOverviewResult(data);
     } catch (err) {
         showAlert('Consumer lag', err.message);
@@ -1806,9 +2122,12 @@ function renderClusterMetadata(data) {
 
     const controller = data.controllerId;
     const controllerBroker = (data.brokers || []).find((b) => b.nodeId === controller);
-    const controllerStr = controllerBroker
-        ? `${controllerBroker.host}:${controllerBroker.port} (node ${controller})`
-        : (controller == null ? '—' : `node ${controller}`);
+    let controllerStr = '—';
+    if (controllerBroker) {
+        controllerStr = `${controllerBroker.host}:${controllerBroker.port} (node ${controller})`;
+    } else if (controller != null) {
+        controllerStr = `node ${controller}`;
+    }
 
     const groupLabel = data.groupCount === null ? '—' : String(data.groupCount);
 
@@ -1838,11 +2157,11 @@ function renderClusterMetadata(data) {
 async function loadClusterOverview() {
     showLoading();
     try {
-        const kafka = await getKafkaClient();
         const configured = (envConfig && activeEnv && envConfig[activeEnv])
             ? envConfig[activeEnv].brokers
             : [];
-        const data = await getClusterMetadata(kafka, configured);
+        const data = await withKafkaAuthRecovery('', async (kafka) =>
+            getClusterMetadata(kafka, configured));
         renderClusterMetadata(data);
     } catch (err) {
         showAlert('Cluster overview', err.message);
@@ -1859,24 +2178,6 @@ function wireClusterOverviewControls() {
 function wireLagOverviewControls() {
     const btn = document.getElementById('lagLoadButton');
     if (btn) btn.addEventListener('click', () => loadConsumerLagOverview());
-    const resetAllBtn = document.getElementById('lagResetAllButton');
-    if (resetAllBtn) {
-        resetAllBtn.addEventListener('click', () => {
-            const ids = (lagOverviewData && Array.isArray(lagOverviewData.groups))
-                ? lagOverviewData.groups.map((g) => g.groupId).filter(Boolean)
-                : [];
-            handleLagReset('bulk', ids);
-        });
-    }
-    const deleteAllBtn = document.getElementById('lagDeleteAllButton');
-    if (deleteAllBtn) {
-        deleteAllBtn.addEventListener('click', () => {
-            const ids = (lagOverviewData && Array.isArray(lagOverviewData.groups))
-                ? lagOverviewData.groups.map((g) => g.groupId).filter(Boolean)
-                : [];
-            handleLagDelete('bulk', ids);
-        });
-    }
     setLagResetControlsState();
 }
 
@@ -1924,7 +2225,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         let storedProducerFormat = null;
         try {
             storedProducerFormat = window.localStorage.getItem(PRODUCER_FORMAT_STORAGE_KEY);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage producer format read', err);
+        }
         applyProducerFormat(PAYLOAD_FORMATS[storedProducerFormat] ? storedProducerFormat : DEFAULT_FORMAT, { skipStorage: true });
 
         Object.values(envConfig).forEach((env) => {
@@ -1947,8 +2250,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             showLoading();
             try {
                 const expanded = expandTokens(editor.getValue());
-                const kafka = await getKafkaClient();
-                await produceMessage(kafka, producerTopic, expanded);
+                await withKafkaAuthRecovery(producerTopic || '', async (kafka) => {
+                    await produceMessage(kafka, producerTopic, expanded);
+                });
             } catch (error) {
                 showAlert('Kafka Producer Error', error.message);
             }
@@ -1980,6 +2284,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     setGroupForTopic(activeEnv, opts.topic, consumerGroup);
                     updateSummaryCards();
 
+                    await withKafkaAuthRecovery(opts.topic || '', pingKafkaAuth);
                     const kafka = await getKafkaClient();
                     setConsumerConsumeSummary(opts);
                     setConsumeRunningUI(true);
@@ -2049,7 +2354,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         let storedConsumerFormat = null;
         try {
             storedConsumerFormat = window.localStorage.getItem(CONSUMER_FORMAT_STORAGE_KEY);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage consumer format read', err);
+        }
         applyConsumerFormat(PAYLOAD_FORMATS[storedConsumerFormat] ? storedConsumerFormat : DEFAULT_FORMAT, { skipStorage: true });
 
         wireTemplateControls();
@@ -2083,7 +2390,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 function formatConsumeSummaryText(opts) {
     if (!opts) return '';
     let startLine;
-    const sm = opts.startMode || 'latest';
+    const sm = opts.startMode || 'earliest';
     if (sm === 'earliest') {
         startLine = 'Beginning';
     } else if (sm === 'offset') {
@@ -2142,13 +2449,14 @@ function readConsumerOptions() {
         return {
             topic: consumerTopic,
             groupId: groupRaw || DEFAULT_GROUP,
-            startMode: 'latest',
+            /* Basic hides “Start from”; use beginning so test topics with existing data show messages (latest only shows new records after join). */
+            startMode: 'earliest',
             partition: null,
             offset: null,
             maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
         };
     }
-    const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'latest';
+    const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'earliest';
     const partitionRaw = document.getElementById('partitionSelect').value;
     const offsetRaw = document.getElementById('offsetInput').value;
     return {
@@ -2159,6 +2467,43 @@ function readConsumerOptions() {
         offset: startMode === 'offset' && offsetRaw !== '' ? offsetRaw : null,
         maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
     };
+}
+
+function wireConsumerStartModeHelp() {
+    const btn = document.getElementById('consumerStartModeHelpBtn');
+    const pop = document.getElementById('consumerStartModeHelpTooltip');
+    if (!btn || !pop) return;
+
+    function detachGlobalListeners() {
+        document.removeEventListener('click', onDocClick);
+        document.removeEventListener('keydown', onKeydown);
+    }
+
+    function setOpen(open) {
+        detachGlobalListeners();
+        pop.hidden = !open;
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) {
+            document.addEventListener('keydown', onKeydown);
+            setTimeout(() => {
+                document.addEventListener('click', onDocClick);
+            }, 0);
+        }
+    }
+
+    function onDocClick(ev) {
+        if (btn.contains(ev.target) || pop.contains(ev.target)) return;
+        setOpen(false);
+    }
+
+    function onKeydown(ev) {
+        if (ev.key === 'Escape') setOpen(false);
+    }
+
+    btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        setOpen(pop.hidden);
+    });
 }
 
 function wireConsumerControls() {
@@ -2221,6 +2566,8 @@ function wireConsumerControls() {
             applyConsumerFormat(e.target.value);
         });
     }
+
+    wireConsumerStartModeHelp();
 }
 
 function wireTemplateControls() {
@@ -2326,7 +2673,10 @@ async function reapplyConfig(newConfig) {
         }
 
         envConfig = newConfig;
-        kafkaClientCache = { env: null, client: null };
+        Object.keys(envConfig).forEach((envId) => {
+            envConfig[envId].connection = normalizeConnection(envConfig[envId].connection);
+        });
+        invalidateKafkaClientCache();
         topicsCache = [];
 
         const envSelect = document.getElementById('envSelect');
@@ -2389,11 +2739,12 @@ const onEnvChange = (envId) => {
     clearLagOverviewUI();
 
     topicsCache = [];
-    kafkaClientCache = { env: null, client: null };
+    invalidateKafkaClientCache();
 
     reloadProduceButton();
     updateSummaryCards();
     applyConsumerGroupFieldState();
+    syncUnsafeConsumerGroupBodyAttr();
 
     persistLastEnv(activeEnv);
     hideLoading();
@@ -2426,6 +2777,41 @@ const onTopicChange = (topic, methodId) => {
     hideLoading();
 };
 
+function loadLazyMethodTabData(tabId) {
+    if (tabId === 'topicsBrowser' && topicsCache.length === 0) {
+        loadTopicsBrowser(true);
+    }
+    if (tabId === 'consumerLag') {
+        populateLagTopicSelect();
+    }
+    if (tabId === 'clusterInfo') {
+        loadClusterOverview();
+    }
+}
+
+function syncTopicSelectValueForTab(tab) {
+    const topicSelect = document.getElementById('topicSelect');
+    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag' && tab.id !== 'clusterInfo') {
+        topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
+    }
+}
+
+function syncConsumerChromeForActiveTab(tab) {
+    if (tab.id !== 'consumer') return;
+    consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
+    const groupInput = document.getElementById('consumerGroupInput');
+    if (groupInput) groupInput.value = consumerGroup;
+    if (consumerTopic) {
+        refreshPartitions(consumerTopic);
+    } else {
+        refreshPartitions('');
+    }
+    const stopConsumeButton = document.getElementById('consumeButton');
+    if (!consumeStarted && stopConsumeButton) {
+        stopConsumeButton.disabled = consumerTopic === '';
+    }
+}
+
 const onMethodTabClick = (tab) => {
     activeMethod = tab.id;
     if (activeEnv) {
@@ -2438,39 +2824,11 @@ const onMethodTabClick = (tab) => {
         document.getElementById(m.containerId).style.display = m.id === tab.id ? 'flex' : 'none';
     });
 
-    if (tab.id === 'topicsBrowser' && topicsCache.length === 0) {
-        loadTopicsBrowser(true);
-    }
-
-    if (tab.id === 'consumerLag') {
-        populateLagTopicSelect();
-    }
-
-    if (tab.id === 'clusterInfo') {
-        loadClusterOverview();
-    }
-
+    loadLazyMethodTabData(tab.id);
     applyActiveMethodLayout();
-
-    const topicSelect = document.getElementById('topicSelect');
-    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag' && tab.id !== 'clusterInfo') {
-        topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
-    }
-
-    if (tab.id === 'consumer') {
-        consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
-        const groupInput = document.getElementById('consumerGroupInput');
-        if (groupInput) groupInput.value = consumerGroup;
-        if (consumerTopic) {
-            refreshPartitions(consumerTopic);
-        } else {
-            refreshPartitions('');
-        }
-        const stopConsumeButton = document.getElementById('consumeButton');
-        if (!consumeStarted && stopConsumeButton) {
-            stopConsumeButton.disabled = consumerTopic === '';
-        }
-    } else if (tab.id === 'producer') {
+    syncTopicSelectValueForTab(tab);
+    syncConsumerChromeForActiveTab(tab);
+    if (tab.id === 'producer') {
         reloadProduceButton();
     }
 
@@ -2576,7 +2934,9 @@ function initializeOptionsResizer() {
     let stored = null;
     try {
         stored = window.localStorage.getItem(OPTIONS_WIDTH_STORAGE_KEY);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage options width read', err);
+    }
     applyOptionsWidth(stored != null ? stored : OPTIONS_WIDTH_DEFAULT);
 
     let dragStartX = 0;
@@ -2599,7 +2959,9 @@ function initializeOptionsResizer() {
         const finalWidth = clampOptionsWidth(optionsPanel.getBoundingClientRect().width);
         try {
             window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(finalWidth));
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage options width write', err);
+        }
     }
 
     resizer.addEventListener('mousedown', (event) => {
@@ -2617,7 +2979,9 @@ function initializeOptionsResizer() {
         applyOptionsWidth(OPTIONS_WIDTH_DEFAULT);
         try {
             window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(OPTIONS_WIDTH_DEFAULT));
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage options width default', err);
+        }
     });
 }
 
@@ -2640,7 +3004,9 @@ function initializeSidebarCollapse() {
     let stored = null;
     try {
         stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage sidebar read', err);
+    }
     applySidebarCollapsedState(stored === '1');
 
     toggle.addEventListener('click', () => {
@@ -2650,7 +3016,9 @@ function initializeSidebarCollapse() {
         applySidebarCollapsedState(next);
         try {
             window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage sidebar write', err);
+        }
     });
 }
 
