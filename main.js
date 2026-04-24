@@ -15,6 +15,7 @@ function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1000,
         height: 800,
+        autoHideMenuBar: true,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
@@ -26,6 +27,7 @@ function createWindow() {
 
     const menu = Menu.buildFromTemplate(isMac ? macMenu : winMenu);
     Menu.setApplicationMenu(menu);
+    mainWindow.removeMenu();
 
     if (isDev) {
         mainWindow.webContents.openDevTools(); // Open DevTools to see renderer process logs
