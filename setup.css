@@ -21,6 +21,44 @@ body {
     -moz-osx-font-smoothing: grayscale;
 }
 
+.connection-details {
+    margin: 14px 0;
+    border: 1px solid var(--color-border, #333);
+    border-radius: 12px;
+    padding: 8px 12px;
+    background: var(--color-bg-soft, rgba(0, 0, 0, 0.15));
+}
+
+.connection-details-summary {
+    cursor: pointer;
+    font-weight: 700;
+    padding: 8px 0;
+    color: var(--color-heading);
+}
+
+.connection-details-body {
+    padding: 6px 0 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.connection-card {
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-elev);
+    padding: 10px 12px;
+}
+
+.connection-card-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin-bottom: 10px;
+}
+
 .setup-app {
     flex: 1;
     min-height: 0;
@@ -198,22 +236,27 @@ body {
 }
 
 .field input[type="text"],
+.field input[type="password"],
+.field select,
 .field textarea {
     width: 100%;
+    min-height: 40px;
     padding: 10px 12px;
-    border: 1px solid var(--color-border);
+    border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    background: var(--color-bg-soft);
-    color: var(--color-text);
+    background: var(--color-bg-elev);
+    color: var(--color-heading);
     font: inherit;
     transition: border-color var(--transition), box-shadow var(--transition);
 }
 
 .field input:focus,
+.field select:focus,
 .field textarea:focus {
     outline: none;
     border-color: var(--color-accent);
     box-shadow: var(--shadow-glow);
+    background: var(--color-bg);
 }
 
 .field textarea {
@@ -221,6 +264,33 @@ body {
     resize: vertical;
     font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 0.8125rem;
+}
+
+.field input::placeholder,
+.field textarea::placeholder {
+    color: var(--color-text-subtle);
+    opacity: 1;
+}
+
+.field select {
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%), linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+    background-position: calc(100% - 18px) calc(50% - 3px), calc(100% - 12px) calc(50% - 3px);
+    background-size: 6px 6px, 6px 6px;
+    background-repeat: no-repeat;
+    padding-right: 34px;
+}
+
+.input-with-action {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.input-action-btn {
+    min-height: 40px;
+    padding: 0 12px;
 }
 
 .field-hint {

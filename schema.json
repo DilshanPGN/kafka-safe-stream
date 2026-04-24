@@ -13,6 +13,27 @@
                 "topicList": {
                     "type": "array",
                     "items": { "type": "string" }
+                },
+                "connection": {
+                    "type": "object",
+                    "properties": {
+                        "securityProtocol": {
+                            "type": "string",
+                            "enum": ["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"]
+                        },
+                        "saslMechanism": {
+                            "type": "string",
+                            "enum": ["none", "plain", "scram-sha-256", "scram-sha-512", "oauthbearer", "aws"]
+                        },
+                        "username": { "type": "string" },
+                        "awsAccessKeyId": { "type": "string" },
+                        "awsAuthorizationIdentity": { "type": "string" },
+                        "rejectUnauthorized": { "type": "boolean" },
+                        "caFile": { "type": "string" },
+                        "certFile": { "type": "string" },
+                        "keyFile": { "type": "string" }
+                    },
+                    "additionalProperties": false
                 }
             },
             "required": ["id", "label", "brokers", "topicList"],

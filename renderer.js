@@ -2,6 +2,7 @@ const { ipcRenderer } = require('electron');
 const {
     createKafkaClient,
     produceMessage,
+    disconnectProducer,
     stopConsuming,
     consumeMessages,
     getTopicsAndPartitions,
@@ -13,6 +14,7 @@ const {
     appendOffsetResetAudit,
     getClusterMetadata,
 } = require('./backend/kafka');
+const { normalizeConnection, connectionFingerprint, isKafkaAuthError } = require('./backend/kafkaConnection');
 const templatesApi = require('./backend/templates');
 const { expandTokens, TOKEN_INSERT_OPTIONS } = require('./backend/randomTokens');
 const path = require('path');
@@ -103,7 +105,11 @@ let consumedMessages = [];
 let selectedTemplateId = '';
 let producerFormat = DEFAULT_FORMAT;
 let consumerFormat = DEFAULT_FORMAT;
-let kafkaClientCache = { env: null, client: null };
+let kafkaClientCache = { key: null, client: null };
+/** Session-only credential fields per env (override encrypted store). */
+let sessionSecretsByEnv = {};
+/** Bumped when secrets change so the Kafka client is rebuilt. */
+let secretEpochByEnv = {};
 let rendererInitialized = false;
 let pendingConfigUpdate = null;
 window.refreshIntervalId = null;
@@ -217,13 +223,245 @@ function persistLastEnv(envId) {
     savePreferences(prefs);
 }
 
+function invalidateKafkaClientCache() {
+    const prev = kafkaClientCache.client;
+    kafkaClientCache = { key: null, client: null };
+    if (prev) {
+        disconnectProducer(prev).catch((err) => logDebug('disconnectProducer', err));
+    }
+}
+
+function bumpSecretEpoch(envId) {
+    if (!envId) return;
+    secretEpochByEnv[envId] = (secretEpochByEnv[envId] || 0) + 1;
+}
+
+async function mergeKafkaSecretsForEnv(envId) {
+    let disk = {};
+    try {
+        const d = await ipcRenderer.invoke('kss-credentials:get', { envId });
+        if (d && typeof d === 'object') disk = { ...d };
+    } catch (err) {
+        logDebug('kss-credentials:get', err);
+    }
+    const sess = sessionSecretsByEnv[envId] || {};
+    return { ...disk, ...sess };
+}
+
+function hasAnyKafkaSecret(secrets) {
+    if (!secrets || typeof secrets !== 'object') return false;
+    return Boolean(
+        secrets.password
+        || secrets.oauthAccessToken
+        || secrets.awsSecretAccessKey
+        || secrets.sslKeyPassphrase,
+    );
+}
+
 async function getKafkaClient() {
-    if (kafkaClientCache.env === activeEnv && kafkaClientCache.client) {
+    const env = envConfig[activeEnv];
+    if (!env) {
+        throw new Error('No environment selected');
+    }
+    const connection = normalizeConnection(env.connection);
+    const secrets = await mergeKafkaSecretsForEnv(activeEnv);
+    const hasSecret = hasAnyKafkaSecret(secrets);
+    const epoch = secretEpochByEnv[activeEnv] || 0;
+    const fp = `${activeEnv}|${epoch}|${connectionFingerprint(connection, env.brokers, hasSecret)}`;
+    if (kafkaClientCache.key === fp && kafkaClientCache.client) {
         return kafkaClientCache.client;
     }
-    const client = await createKafkaClient(envConfig[activeEnv].brokers);
-    kafkaClientCache = { env: activeEnv, client };
+    const client = createKafkaClient(env.brokers, { connection, secrets });
+    kafkaClientCache = { key: fp, client };
     return client;
+}
+
+/**
+ * @param {{ topicLabel?: string, error: Error, connection: ReturnType<typeof normalizeConnection> }} args
+ * @returns {Promise<null|{ remember: boolean, password?: string, oauthAccessToken?: string, awsSecretAccessKey?: string, awsSessionToken?: string, sslKeyPassphrase?: string }>}
+ */
+function showKafkaCredentialModal(args) {
+    const { topicLabel, error, connection } = args;
+    return new Promise((resolve) => {
+        const overlay = document.getElementById('kafka-auth-overlay');
+        const ctx = document.getElementById('kafka-auth-context');
+        const errEl = document.getElementById('kafka-auth-error');
+        const gPass = document.getElementById('kafka-auth-group-password');
+        const gOauth = document.getElementById('kafka-auth-group-oauth');
+        const gAws = document.getElementById('kafka-auth-group-aws');
+        const gSsl = document.getElementById('kafka-auth-group-ssl');
+        const inPass = document.getElementById('kafka-auth-password');
+        const inOauth = document.getElementById('kafka-auth-oauth');
+        const inAwsSec = document.getElementById('kafka-auth-aws-secret');
+        const inAwsTok = document.getElementById('kafka-auth-aws-session');
+        const inSsl = document.getElementById('kafka-auth-ssl-pass');
+        const remember = document.getElementById('kafka-auth-remember');
+        const btnOk = document.getElementById('kafka-auth-submit');
+        const btnCancel = document.getElementById('kafka-auth-cancel');
+        const btnClear = document.getElementById('kafka-auth-clear-saved');
+        const backdrop = overlay && overlay.querySelector('[data-kafka-auth-dismiss]');
+        if (!overlay || !ctx || !errEl || !btnOk || !btnCancel) {
+            resolve(null);
+            return;
+        }
+
+        const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+            || connection.securityProtocol === 'SASL_SSL';
+        const mech = connection.saslMechanism;
+        const showPass = useSasl && (mech === 'plain' || mech === 'scram-sha-256' || mech === 'scram-sha-512');
+        const showOauth = useSasl && mech === 'oauthbearer';
+        const showAws = useSasl && mech === 'aws';
+        const showSsl = Boolean(connection.keyFile && String(connection.keyFile).trim());
+
+        ctx.textContent = topicLabel
+            ? `The cluster rejected the connection while using topic "${topicLabel}". Enter credentials for environment "${activeEnv}".`
+            : `The cluster rejected the connection. Enter credentials for environment "${activeEnv}".`;
+        errEl.textContent = (error && error.message) ? String(error.message) : 'Authentication or TLS error';
+
+        gPass.style.display = showPass ? 'block' : 'none';
+        gOauth.style.display = showOauth ? 'block' : 'none';
+        gAws.style.display = showAws ? 'block' : 'none';
+        gSsl.style.display = showSsl ? 'block' : 'none';
+
+        inPass.value = '';
+        inOauth.value = '';
+        inAwsSec.value = '';
+        inAwsTok.value = '';
+        inSsl.value = '';
+        remember.checked = true;
+
+        const cleanup = (value) => {
+            overlay.style.display = 'none';
+            btnOk.removeEventListener('click', onOk);
+            btnCancel.removeEventListener('click', onCancel);
+            if (btnClear) btnClear.removeEventListener('click', onClear);
+            if (backdrop) backdrop.removeEventListener('click', onCancel);
+            resolve(value);
+        };
+
+        const onCancel = () => cleanup(null);
+
+        const onClear = async () => {
+            try {
+                await ipcRenderer.invoke('kss-credentials:clear', { envId: activeEnv });
+            } catch (err) {
+                logDebug('kss-credentials:clear', err);
+            }
+            delete sessionSecretsByEnv[activeEnv];
+            bumpSecretEpoch(activeEnv);
+            invalidateKafkaClientCache();
+            showAlert('Saved secrets', 'Stored credentials for this environment were cleared.');
+        };
+
+        const onOk = () => {
+            const out = { remember: remember.checked };
+            if (showPass) out.password = String(inPass.value || '');
+            if (showOauth) out.oauthAccessToken = String(inOauth.value || '').trim();
+            if (showAws) {
+                out.awsSecretAccessKey = String(inAwsSec.value || '');
+                out.awsSessionToken = String(inAwsTok.value || '');
+            }
+            if (showSsl) out.sslKeyPassphrase = String(inSsl.value || '');
+            if (showPass && !out.password) {
+                showAlert('Credentials', 'Password is required.');
+                return;
+            }
+            if (showOauth && !out.oauthAccessToken) {
+                showAlert('Credentials', 'Access token is required.');
+                return;
+            }
+            if (showAws && !out.awsSecretAccessKey) {
+                showAlert('Credentials', 'AWS secret access key is required.');
+                return;
+            }
+            cleanup(out);
+        };
+
+        btnOk.addEventListener('click', onOk);
+        btnCancel.addEventListener('click', onCancel);
+        if (btnClear) btnClear.addEventListener('click', onClear);
+        if (backdrop) backdrop.addEventListener('click', onCancel);
+
+        overlay.style.display = 'flex';
+        setTimeout(() => {
+            if (showPass) inPass.focus();
+            else if (showOauth) inOauth.focus();
+            else if (showAws) inAwsSec.focus();
+            else if (showSsl) inSsl.focus();
+            else btnOk.focus();
+        }, 50);
+    });
+}
+
+async function persistKafkaSecretsFromModal(envId, formPayload, remember) {
+    const fp = { ...(formPayload || {}) };
+    delete fp.remember;
+    if (!remember) {
+        sessionSecretsByEnv[envId] = { ...(sessionSecretsByEnv[envId] || {}), ...fp };
+        return;
+    }
+    let disk = {};
+    try {
+        const d = await ipcRenderer.invoke('kss-credentials:get', { envId });
+        if (d && typeof d === 'object') disk = { ...d };
+    } catch (err) {
+        logDebug('kss-credentials:get merge', err);
+    }
+    const merged = { ...disk, ...fp };
+    await ipcRenderer.invoke('kss-credentials:set', { envId, payload: merged });
+    delete sessionSecretsByEnv[envId];
+}
+
+/**
+ * Run a Kafka operation; on auth/TLS failure prompt for secrets and retry (bounded).
+ * @param {string} topicLabel
+ * @param {(kafka: import('kafkajs').Kafka) => Promise<unknown>} fn
+ */
+async function withKafkaAuthRecovery(topicLabel, fn) {
+    const maxRounds = 3;
+    for (let round = 0; round < maxRounds; round += 1) {
+        try {
+            const kafka = await getKafkaClient();
+            return await fn(kafka);
+        } catch (err) {
+            if (!isKafkaAuthError(err) || !activeEnv || !envConfig[activeEnv]) {
+                throw err;
+            }
+            const connection = normalizeConnection(envConfig[activeEnv].connection);
+            const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+                || connection.securityProtocol === 'SASL_SSL';
+            const mech = connection.saslMechanism;
+            const needModal = (useSasl && mech !== 'none')
+                || (Boolean(connection.keyFile && String(connection.keyFile).trim()));
+            if (!needModal) {
+                throw err;
+            }
+            const form = await showKafkaCredentialModal({ topicLabel, error: err, connection });
+            if (!form) throw err;
+            await persistKafkaSecretsFromModal(activeEnv, form, form.remember);
+            bumpSecretEpoch(activeEnv);
+            invalidateKafkaClientCache();
+        }
+    }
+    throw new Error('Kafka authentication failed after multiple attempts.');
+}
+
+async function disconnectAdminQuiet(admin) {
+    try {
+        await admin.disconnect();
+    } catch (err) {
+        logDebug('admin.disconnect', err);
+    }
+}
+
+/** Minimal broker auth check (SASL/TLS) before starting a long-lived consumer. */
+async function pingKafkaAuth(kafka) {
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+    } finally {
+        await disconnectAdminQuiet(admin);
+    }
 }
 
 function applyTheme(theme) {
@@ -481,6 +719,10 @@ async function loadConfig() {
             if (!valid) {
                 throw new Error('Invalid configuration format');
             }
+            Object.keys(envConfig).forEach((envId) => {
+                const e = envConfig[envId];
+                e.connection = normalizeConnection(e.connection);
+            });
             return envConfig;
         } catch (error) {
             console.error('Error reading or parsing the config file:', error);
@@ -1385,16 +1627,17 @@ async function refreshPartitions(topicName) {
     select.appendChild(allOpt);
     if (!topicName || !envConfig || !envConfig[activeEnv]) return;
     try {
-        const kafka = await getKafkaClient();
-        const offsets = await getTopicOffsets(kafka, topicName);
-        offsets
-            .sort((a, b) => Number(a.partition) - Number(b.partition))
-            .forEach((o) => {
-                const opt = document.createElement('option');
-                opt.value = String(o.partition);
-                opt.textContent = `Partition ${o.partition} (low=${o.low}, high=${o.high})`;
-                select.appendChild(opt);
-            });
+        await withKafkaAuthRecovery(topicName || '', async (kafka) => {
+            const offsets = await getTopicOffsets(kafka, topicName);
+            offsets
+                .sort((a, b) => Number(a.partition) - Number(b.partition))
+                .forEach((o) => {
+                    const opt = document.createElement('option');
+                    opt.value = String(o.partition);
+                    opt.textContent = `Partition ${o.partition} (low=${o.low}, high=${o.high})`;
+                    select.appendChild(opt);
+                });
+        });
     } catch (err) {
         console.warn('Could not load partitions for topic', topicName, err);
     }
@@ -1408,8 +1651,9 @@ async function loadTopicsBrowser(forceRefresh = false) {
     showLoading();
     try {
         if (forceRefresh || topicsCache.length === 0) {
-            const kafka = await getKafkaClient();
-            topicsCache = await getTopicsAndPartitions(kafka);
+            await withKafkaAuthRecovery('', async (kafka) => {
+                topicsCache = await getTopicsAndPartitions(kafka);
+            });
         }
         renderTopicsTable();
         if (countEl) countEl.textContent = `${topicsCache.length} topic${topicsCache.length === 1 ? '' : 's'}`;
@@ -1559,8 +1803,8 @@ async function handleLagDelete(scope, groupIds) {
     setLagResetControlsState();
     showLoading();
     try {
-        const kafka = await getKafkaClient();
-        const details = await deleteConsumerGroups(kafka, { groupIds: targets });
+        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+            deleteConsumerGroups(kafka, { groupIds: targets }));
         if (details.failureCount === 0) {
             showAlert('Consumer group deleted', `Deleted ${details.successCount} group(s).`);
         } else if (details.successCount > 0) {
@@ -1623,15 +1867,16 @@ async function handleLagReset(scope, groupIds) {
     setLagResetControlsState();
     showLoading();
     try {
-        const kafka = await getKafkaClient();
         let outcome = 'success';
         let details;
 
         if (scope === 'bulk') {
-            details = await resetConsumerGroupsOffsetsToLatest(kafka, { topic, groupIds: targets });
+            details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+                resetConsumerGroupsOffsetsToLatest(kafka, { topic, groupIds: targets }));
             outcome = showBulkOffsetResetResultAlerts(details, topic);
         } else {
-            details = await resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId: targets[0] });
+            details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+                resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId: targets[0] }));
             showAlert('Offset reset', `Reset offsets to latest for "${targets[0]}" on "${topic}".`);
         }
 
@@ -1794,8 +2039,8 @@ async function loadConsumerLagOverview() {
     if (status) status.textContent = 'Loading…';
     showLoading();
     try {
-        const kafka = await getKafkaClient();
-        const data = await getConsumerLagOverview(kafka, lagTopic);
+        const data = await withKafkaAuthRecovery(lagTopic || '', async (kafka) =>
+            getConsumerLagOverview(kafka, lagTopic));
         renderLagOverviewResult(data);
     } catch (err) {
         showAlert('Consumer lag', err.message);
@@ -1925,11 +2170,11 @@ function renderClusterMetadata(data) {
 async function loadClusterOverview() {
     showLoading();
     try {
-        const kafka = await getKafkaClient();
         const configured = (envConfig && activeEnv && envConfig[activeEnv])
             ? envConfig[activeEnv].brokers
             : [];
-        const data = await getClusterMetadata(kafka, configured);
+        const data = await withKafkaAuthRecovery('', async (kafka) =>
+            getClusterMetadata(kafka, configured));
         renderClusterMetadata(data);
     } catch (err) {
         showAlert('Cluster overview', err.message);
@@ -2036,8 +2281,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             showLoading();
             try {
                 const expanded = expandTokens(editor.getValue());
-                const kafka = await getKafkaClient();
-                await produceMessage(kafka, producerTopic, expanded);
+                await withKafkaAuthRecovery(producerTopic || '', async (kafka) => {
+                    await produceMessage(kafka, producerTopic, expanded);
+                });
             } catch (error) {
                 showAlert('Kafka Producer Error', error.message);
             }
@@ -2069,6 +2315,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     setGroupForTopic(activeEnv, opts.topic, consumerGroup);
                     updateSummaryCards();
 
+                    await withKafkaAuthRecovery(opts.topic || '', pingKafkaAuth);
                     const kafka = await getKafkaClient();
                     setConsumerConsumeSummary(opts);
                     setConsumeRunningUI(true);
@@ -2174,7 +2421,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 function formatConsumeSummaryText(opts) {
     if (!opts) return '';
     let startLine;
-    const sm = opts.startMode || 'latest';
+    const sm = opts.startMode || 'earliest';
     if (sm === 'earliest') {
         startLine = 'Beginning';
     } else if (sm === 'offset') {
@@ -2233,13 +2480,14 @@ function readConsumerOptions() {
         return {
             topic: consumerTopic,
             groupId: groupRaw || DEFAULT_GROUP,
-            startMode: 'latest',
+            /* Basic hides “Start from”; use beginning so test topics with existing data show messages (latest only shows new records after join). */
+            startMode: 'earliest',
             partition: null,
             offset: null,
             maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
         };
     }
-    const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'latest';
+    const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'earliest';
     const partitionRaw = document.getElementById('partitionSelect').value;
     const offsetRaw = document.getElementById('offsetInput').value;
     return {
@@ -2417,7 +2665,10 @@ async function reapplyConfig(newConfig) {
         }
 
         envConfig = newConfig;
-        kafkaClientCache = { env: null, client: null };
+        Object.keys(envConfig).forEach((envId) => {
+            envConfig[envId].connection = normalizeConnection(envConfig[envId].connection);
+        });
+        invalidateKafkaClientCache();
         topicsCache = [];
 
         const envSelect = document.getElementById('envSelect');
@@ -2480,7 +2731,7 @@ const onEnvChange = (envId) => {
     clearLagOverviewUI();
 
     topicsCache = [];
-    kafkaClientCache = { env: null, client: null };
+    invalidateKafkaClientCache();
 
     reloadProduceButton();
     updateSummaryCards();

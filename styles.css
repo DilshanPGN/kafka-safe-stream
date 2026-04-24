@@ -284,6 +284,17 @@ body[data-app-mode="basic"] .options-consumer-controls .options-row--basic-hide 
     display: none !important;
 }
 
+body[data-app-mode="advanced"] .basic-consumer-start-hint {
+    display: none !important;
+}
+
+.basic-consumer-start-hint .field-hint,
+.consumer-start-mode-hint {
+    margin: 6px 0 0;
+    line-height: 1.45;
+    font-size: var(--ui-fs-caption);
+}
+
 /* Consumer lag: offset reset/delete are advanced-only */
 body[data-app-mode="basic"] #consumerLagContainer .lag-col-actions,
 body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
@@ -1843,11 +1854,106 @@ body.options-resizing * {
     gap: 8px;
 }
 
+.kafka-auth-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    /* Above #loading-container (100000) so credentials can be entered during broker calls */
+    z-index: 100010;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+    pointer-events: auto;
+}
+
+.kafka-auth-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.kafka-auth-overlay .kafka-auth-dialog.custom-alert {
+    position: relative;
+    display: block;
+    left: auto;
+    top: auto;
+    transform: none;
+    width: min(440px, calc(100vw - 24px));
+    z-index: 1;
+    margin: 0;
+}
+
+.kafka-auth-context {
+    font-size: var(--ui-fs-small);
+    color: var(--color-text-muted, var(--color-text));
+    margin: 0 0 8px;
+}
+
+.kafka-auth-error {
+    font-size: var(--ui-fs-caption);
+    color: var(--color-danger, #c44);
+    margin: 0 0 12px;
+    word-break: break-word;
+}
+
+.kafka-auth-field-group {
+    margin-bottom: 12px;
+}
+
+.kafka-auth-field-group label {
+    display: block;
+    font-size: var(--ui-fs-caption);
+    margin-bottom: 4px;
+}
+
+.kafka-auth-field-group input[type="password"],
+.kafka-auth-field-group textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+    padding: 8px 12px;
+    font-size: var(--ui-fs-control);
+}
+
+.kafka-auth-field-group textarea {
+    resize: vertical;
+    min-height: 72px;
+    font-family: var(--font-mono, monospace);
+}
+
+.kafka-auth-remember {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--ui-fs-small);
+    margin: 12px 0 16px;
+    cursor: pointer;
+}
+
+.kafka-auth-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.kafka-auth-actions-spacer {
+    flex: 1 1 8px;
+    min-width: 0;
+}
+
 .consumer-idle-overlay {
     display: none;
     position: fixed;
     inset: 0;
-    z-index: 20000;
+    z-index: 100010;
     align-items: center;
     justify-content: center;
     padding: 16px;
@@ -1917,7 +2023,7 @@ body.options-resizing * {
 .custom-alert {
     display: none;
     position: fixed;
-    z-index: 1000;
+    z-index: 100010;
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);

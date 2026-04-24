@@ -2,6 +2,7 @@ const { Kafka, Partitioners, KafkaJSDeleteGroupsError } = require('kafkajs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { buildKafkaClientConfig } = require('./kafkaConnection');
 
 function logDebug(context, err) {
     if (typeof console !== 'undefined' && typeof console.debug === 'function') {
@@ -19,11 +20,33 @@ async function safeAdminDisconnect(admin) {
 
 let consumer;
 let consumerStopping = false;
+/**
+ * Cache one connected producer per Kafka client instance.
+ * WeakMap avoids leaks when Kafka clients are replaced.
+ */
+const producerCacheByKafka = new WeakMap();
 
-async function createKafkaClient(brokers) {
+/**
+ * @param {string[]|import('kafkajs').KafkaConfig} brokersOrConfig
+ * @param {{ connection?: unknown, secrets?: object }} [options]
+ * @returns {import('kafkajs').Kafka}
+ */
+function createKafkaClient(brokersOrConfig, options) {
+    if (brokersOrConfig && typeof brokersOrConfig === 'object' && !Array.isArray(brokersOrConfig)) {
+        return new Kafka({
+            clientId: 'kafka-safe-stream-app',
+            ...brokersOrConfig,
+        });
+    }
+    const brokers = Array.isArray(brokersOrConfig) ? brokersOrConfig : [];
+    const fragment = buildKafkaClientConfig({
+        brokers,
+        connection: options && options.connection,
+        secrets: options && options.secrets,
+    });
     return new Kafka({
         clientId: 'kafka-safe-stream-app',
-        brokers: brokers,
+        ...fragment,
     });
 }
 
@@ -46,12 +69,16 @@ function brokerListFromInput(raw) {
  * @param {string|string[]} brokersInput
  * @returns {Promise<{ ok: true, clusterId: string, controller: number|null, brokerCount: number, topicNames: string[] }|{ ok: false, error: string }>}
  */
-async function probeClusterConnection(brokersInput) {
+/**
+ * @param {string|string[]} brokersInput
+ * @param {{ connection?: unknown, secrets?: object }} [authOptions]
+ */
+async function probeClusterConnection(brokersInput, authOptions) {
     const brokers = brokerListFromInput(brokersInput);
     if (!brokers.length) {
         return { ok: false, error: 'Enter at least one broker (e.g. localhost:9092).' };
     }
-    const kafka = await createKafkaClient(brokers);
+    const kafka = createKafkaClient(brokers, authOptions || {});
     const admin = kafka.admin();
     try {
         await admin.connect();
@@ -72,12 +99,58 @@ async function probeClusterConnection(brokersInput) {
     }
 }
 
-async function produceMessage(kafka, topic, message, key) {
-    const producer = kafka.producer({
-        createPartitioner: Partitioners.LegacyPartitioner
-    });
+async function getOrCreateProducer(kafka) {
+    const cached = producerCacheByKafka.get(kafka);
+    if (cached && cached.producer) {
+        if (cached.connected) return cached.producer;
+        if (cached.connectPromise) {
+            await cached.connectPromise;
+            return cached.producer;
+        }
+    }
 
-    await producer.connect();
+    const producer = cached && cached.producer
+        ? cached.producer
+        : kafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
+    const entry = cached && cached.producer
+        ? cached
+        : { producer, connected: false, connectPromise: null };
+    producerCacheByKafka.set(kafka, entry);
+
+    if (!entry.connected) {
+        entry.connectPromise = producer.connect()
+            .then(() => {
+                entry.connected = true;
+            })
+            .finally(() => {
+                entry.connectPromise = null;
+            });
+        await entry.connectPromise;
+    }
+    return producer;
+}
+
+async function disconnectProducer(kafka) {
+    const entry = producerCacheByKafka.get(kafka);
+    if (!entry || !entry.producer) return;
+    if (entry.connectPromise) {
+        try {
+            await entry.connectPromise;
+        } catch (err) {
+            logDebug('producer.connect', err);
+        }
+    }
+    try {
+        await entry.producer.disconnect();
+    } catch (err) {
+        logDebug('producer.disconnect', err);
+    } finally {
+        producerCacheByKafka.delete(kafka);
+    }
+}
+
+async function produceMessage(kafka, topic, message, key) {
+    const producer = await getOrCreateProducer(kafka);
     const payload = { value: message };
     if (key !== undefined && key !== null && key !== '') {
         payload.key = String(key);
@@ -86,8 +159,6 @@ async function produceMessage(kafka, topic, message, key) {
         topic: topic,
         messages: [payload],
     });
-
-    await producer.disconnect();
 }
 
 async function getTopicsAndPartitions(kafka) {
@@ -740,6 +811,7 @@ module.exports = {
     brokerListFromInput,
     probeClusterConnection,
     produceMessage,
+    disconnectProducer,
     consumeMessages,
     stopConsuming,
     getTopicsAndPartitions,

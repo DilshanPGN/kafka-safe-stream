@@ -75,7 +75,7 @@ sequenceDiagram
 
     User->>UI: Select env + topic, enter JSON
     User->>UI: Click "Produce to Topic"
-    UI->>KafkaJS: createKafkaClient(brokers)
+    UI->>KafkaJS: createKafkaClient(brokers, connection, secrets)
     KafkaJS->>Kafka: Connect
     UI->>KafkaJS: produceMessage(kafka, topic, payload)
     KafkaJS->>Kafka: producer.send()
@@ -95,7 +95,7 @@ sequenceDiagram
 
     User->>UI: Select env + topic
     User->>UI: Click "Start Consuming"
-    UI->>KafkaJS: createKafkaClient(brokers)
+    UI->>KafkaJS: createKafkaClient(brokers, connection, secrets)
     UI->>KafkaJS: consumeMessages(kafka, topic, groupId, onMessage)
     KafkaJS->>Kafka: consumer.subscribe() + consumer.run()
     loop Each message
@@ -176,8 +176,26 @@ Each **key** is an environment id (e.g. `dev`, `qa`). Each **value** must have:
 | `label`    | string   | Yes      | Display name in the sidebar (e.g. `DEV`, `QA`) |
 | `brokers`  | string[] | Yes      | Kafka broker addresses (e.g. `host:9092`) |
 | `topicList`| string[] | Yes      | Topic names available in this environment |
+| `connection` | object | No   | TLS and SASL settings (see below). Omit for plaintext clusters. |
 
 Environment keys must match: `^[a-zA-Z0-9_-]+$`.
+
+### Connection and authentication (`connection`)
+
+Kafka authenticates to the **cluster** (per environment), not to individual topics. Optional `connection` fields:
+
+| Field | Values / notes |
+|-------|------------------|
+| `securityProtocol` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL` |
+| `saslMechanism` | `none`, `plain`, `scram-sha-256`, `scram-sha-512`, `oauthbearer`, `aws` (AWS MSK IAM) |
+| `username` | SASL username for PLAIN / SCRAM |
+| `awsAccessKeyId`, `awsAuthorizationIdentity` | Required non-secret parts for MSK IAM (`authorizationIdentity` is required by KafkaJS; use a meaningful identity string for your org) |
+| `rejectUnauthorized` | If `false`, TLS server certificate verification is relaxed (default `true`) |
+| `caFile`, `certFile`, `keyFile` | Absolute paths or `~`-prefixed paths to PEM files for TLS |
+
+**Passwords, OAuth tokens, AWS secret keys, and TLS key passphrases** are **not** stored in `.config`. Use **File → Setup** probe fields to test a connection, or enter them in the main app when prompted; if you check **Remember**, they are saved under `%USERPROFILE%\.kss\credentials.store.json` (Windows) or `~/.kss/credentials.store.json` encrypted with Electron **safeStorage** when the OS supports it. If encryption is unavailable (some Linux setups), secrets may be stored in plaintext in that file—the app should warn you.
+
+**SASL/GSSAPI (Kerberos)** is not supported by KafkaJS in the same way as the Java client; use a JVM-based tool for Kerberos if required.
 
 ### Example configuration
 
@@ -190,7 +208,14 @@ Environment keys must match: `^[a-zA-Z0-9_-]+$`.
         "topicList": [
             "test.topic",
             "orders.v1"
-        ]
+        ],
+        "connection": {
+            "securityProtocol": "SASL_SSL",
+            "saslMechanism": "scram-sha-256",
+            "username": "app-reader",
+            "rejectUnauthorized": true,
+            "caFile": "C:\\certs\\company-ca.pem"
+        }
     },
     "qa": {
         "id": "qa",
@@ -223,7 +248,7 @@ Environment keys must match: `^[a-zA-Z0-9_-]+$`.
 4. **Consumer**  
    - Switch to the **Consumer** tab.  
    - Select a topic.  
-   - Click **Start Consuming** to subscribe (from beginning). Messages append in the consumer editor.  
+   - Click **Start Consuming** to subscribe. In **Basic** mode, messages are read from the **beginning** of the topic. In **Advanced** mode, use **Start from**: **Beginning** to read existing data, or **Now (latest)** to only see records produced *after* you start (otherwise an idle test topic can look like “nothing is consuming” while the broker still shows a healthy consumer group).  
    - Click **Stop Consuming** to disconnect.  
    - Use **Clear** to clear the consumer view.
 
@@ -246,7 +271,8 @@ kafka-safe-stream/
 ├── about.html / about.css              # About window
 ├── schema.json           # JSON schema for .config validation
 ├── backend/
-│   └── kafka.js          # KafkaJS client: produce, consume, disconnect
+│   ├── kafka.js          # KafkaJS client: produce, consume, disconnect
+│   └── kafkaConnection.js # TLS/SASL options for KafkaJS
 ├── codemirror/           # CodeMirror assets (editor)
 ├── package.json
 ├── forge.config.js       # Electron Forge packaging (Squirrel, ZIP, deb, rpm, portable)

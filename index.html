@@ -51,6 +51,41 @@
           </div>
       </div>
   </div>
+  <div id="kafka-auth-overlay" class="kafka-auth-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="kafka-auth-title">
+      <div class="kafka-auth-backdrop" data-kafka-auth-dismiss="1" aria-hidden="true"></div>
+      <div class="custom-alert prompt-modal kafka-auth-dialog">
+          <div class="custom-alert-content prompt-content">
+              <h3 id="kafka-auth-title">Kafka credentials</h3>
+              <p id="kafka-auth-context" class="kafka-auth-context"></p>
+              <p id="kafka-auth-error" class="kafka-auth-error"></p>
+              <div id="kafka-auth-group-password" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-password">Password</label>
+                  <input type="password" id="kafka-auth-password" autocomplete="current-password" />
+              </div>
+              <div id="kafka-auth-group-oauth" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-oauth">OAuth bearer access token</label>
+                  <textarea id="kafka-auth-oauth" rows="3" spellcheck="false" placeholder="Paste access token"></textarea>
+              </div>
+              <div id="kafka-auth-group-aws" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-aws-secret">AWS secret access key</label>
+                  <input type="password" id="kafka-auth-aws-secret" autocomplete="off" />
+                  <label for="kafka-auth-aws-session">Session token (optional)</label>
+                  <input type="password" id="kafka-auth-aws-session" autocomplete="off" />
+              </div>
+              <div id="kafka-auth-group-ssl" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-ssl-pass">TLS client key passphrase (optional)</label>
+                  <input type="password" id="kafka-auth-ssl-pass" autocomplete="off" />
+              </div>
+              <label class="kafka-auth-remember"><input type="checkbox" id="kafka-auth-remember" checked /> Remember for this environment (encrypted when the OS supports it)</label>
+              <div class="kafka-auth-actions">
+                  <button type="button" id="kafka-auth-clear-saved" class="btn-secondary">Clear saved secrets</button>
+                  <span class="kafka-auth-actions-spacer"></span>
+                  <button type="button" id="kafka-auth-cancel" class="btn-secondary">Cancel</button>
+                  <button type="button" id="kafka-auth-submit" class="btn-primary">Connect</button>
+              </div>
+          </div>
+      </div>
+  </div>
   <div id="consumer-idle-overlay" class="consumer-idle-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="consumer-idle-title">
       <div class="consumer-idle-backdrop" aria-hidden="true"></div>
       <div id="consumer-idle-dialog" class="custom-alert prompt-modal consumer-idle-modal">
@@ -173,10 +208,14 @@
                           <div class="control-row options-row--basic-hide">
                               <span class="control-label">Start from</span>
                               <div class="radio-group" id="startModeGroup">
-                                  <label><input type="radio" name="startMode" value="latest" checked> Now (latest)</label>
-                                  <label><input type="radio" name="startMode" value="earliest"> Beginning</label>
+                                  <label><input type="radio" name="startMode" value="latest"> Now (latest)</label>
+                                  <label><input type="radio" name="startMode" value="earliest" checked> Beginning</label>
                                   <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
                               </div>
+                              <p class="field-hint consumer-start-mode-hint">“Now (latest)” only delivers messages produced <em>after</em> you start consuming. “Beginning” applies when the consumer group has <em>no</em> committed offsets; otherwise Kafka resumes from the last commit—use a <strong>new consumer group</strong> name (or reset offsets in Consumer lag) to read older data again.</p>
+                          </div>
+                          <div class="control-row basic-consumer-start-hint">
+                              <p class="field-hint">In <strong>Basic</strong> mode, the consumer always reads from the <strong>beginning</strong> of the topic. Use <strong>Advanced</strong> and “Start from” if you only want new messages.</p>
                           </div>
                           <div id="consumerOptionsConsumeSummary" class="consumer-consume-summary consumer-options-consume-summary options-row--basic-hide" hidden role="status" aria-live="polite"></div>
                           <div class="control-row offset-row options-row--basic-hide" id="offsetRow" style="display:none;">

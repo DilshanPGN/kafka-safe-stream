@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -141,6 +141,101 @@ ipcMain.on('config-saved', () => {
     } catch (err) {
         console.error('Failed to forward config-updated:', err);
     }
+});
+
+function credentialsStorePath() {
+    return path.join(os.homedir(), '.kss', 'credentials.store.json');
+}
+
+function loadCredentialsStore() {
+    const p = credentialsStorePath();
+    try {
+        if (!fs.existsSync(p)) return {};
+        const raw = fs.readFileSync(p, 'utf8');
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (err) {
+        console.error('kss-credentials: load failed', err);
+        return {};
+    }
+}
+
+function saveCredentialsStore(store) {
+    const dir = path.join(os.homedir(), '.kss');
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(credentialsStorePath(), JSON.stringify(store, null, 2), 'utf8');
+}
+
+ipcMain.handle('kss-credentials:get', (_event, { envId }) => {
+    if (!envId || typeof envId !== 'string') return null;
+    const store = loadCredentialsStore();
+    const entry = store[envId];
+    if (!entry) return null;
+    try {
+        if (entry.encrypted === true && entry.payload && safeStorage.isEncryptionAvailable()) {
+            const decrypted = safeStorage.decryptString(Buffer.from(entry.payload, 'base64'));
+            return JSON.parse(decrypted);
+        }
+        if (entry.payload && typeof entry.payload === 'object') {
+            return entry.payload;
+        }
+    } catch (err) {
+        console.error('kss-credentials:get decrypt failed', err);
+        return null;
+    }
+    return null;
+});
+
+ipcMain.handle('kss-credentials:set', (_event, { envId, payload }) => {
+    if (!envId || typeof envId !== 'string' || !payload || typeof payload !== 'object') {
+        return { ok: false, error: 'Invalid arguments' };
+    }
+    const store = loadCredentialsStore();
+    const plain = JSON.stringify(payload);
+    if (safeStorage.isEncryptionAvailable()) {
+        const encrypted = safeStorage.encryptString(plain);
+        store[envId] = {
+            encrypted: true,
+            payload: Buffer.from(encrypted).toString('base64'),
+        };
+    } else {
+        store[envId] = { encrypted: false, payload };
+    }
+    saveCredentialsStore(store);
+    return { ok: true, usedEncryption: safeStorage.isEncryptionAvailable() };
+});
+
+ipcMain.handle('kss-credentials:clear', (_event, { envId }) => {
+    if (!envId || typeof envId !== 'string') return { ok: false };
+    const store = loadCredentialsStore();
+    delete store[envId];
+    saveCredentialsStore(store);
+    return { ok: true };
+});
+
+ipcMain.handle('kss-credentials:encryption-available', () => ({
+    available: safeStorage.isEncryptionAvailable(),
+}));
+
+ipcMain.handle('kss-select-file', async (_event, options) => {
+    const win = BrowserWindow.getFocusedWindow() || setupWindow || mainWindow;
+    if (!win) {
+        return { canceled: true, filePath: undefined };
+    }
+    const dialogOpts = {
+        title: (options && options.title) || 'Select file',
+        properties: ['openFile'],
+        filters: (options && Array.isArray(options.filters) && options.filters.length > 0)
+            ? options.filters
+            : [{ name: 'All files', extensions: ['*'] }],
+    };
+    const result = await dialog.showOpenDialog(win, dialogOpts);
+    return {
+        canceled: !!result.canceled,
+        filePath: result.canceled ? undefined : (result.filePaths && result.filePaths[0]),
+    };
 });
 
 ipcMain.handle('save-consumed-export', async (_event, { defaultPath, filters }) => {
