@@ -641,15 +641,46 @@ body[data-theme="dark"] #tabs .tab.active {
     color: var(--color-heading);
     font-weight: 700;
     background: color-mix(in srgb, var(--color-bg-muted) 64%, #ffffff 12%, var(--color-accent) 24%);
-    border-color: color-mix(in srgb, #8a7bff 42%, var(--color-border-strong));
+    border-color: color-mix(in srgb, var(--color-highlight-violet) 42%, var(--color-border-strong));
     transform: translateY(1px);
     box-shadow:
         inset 0 2px 4px rgba(0, 0, 0, 0.45),
         inset 0 0 0 1px color-mix(in srgb, #ffffff 20%, transparent),
         inset 0 -1px 0 color-mix(in srgb, #ffffff 16%, transparent),
-        0 0 0 1px rgba(120, 103, 255, 0.45),
-        0 0 0 3px rgba(86, 153, 255, 0.16),
+        0 0 0 1px color-mix(in srgb, var(--color-highlight-violet) 72%, transparent),
+        0 0 0 3px color-mix(in srgb, var(--color-highlight-blue) 36%, transparent),
         0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+body[data-theme="dark"] input[type="text"],
+body[data-theme="dark"] input[type="number"],
+body[data-theme="dark"] input[type="password"],
+body[data-theme="dark"] textarea,
+body[data-theme="dark"] select {
+    transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+body[data-theme="dark"] input[type="text"]:hover,
+body[data-theme="dark"] input[type="number"]:hover,
+body[data-theme="dark"] input[type="password"]:hover,
+body[data-theme="dark"] textarea:hover,
+body[data-theme="dark"] select:hover {
+    border-color: color-mix(in srgb, var(--color-highlight-violet) 35%, var(--color-border));
+}
+
+body[data-theme="dark"] input[type="text"]:focus,
+body[data-theme="dark"] input[type="number"]:focus,
+body[data-theme="dark"] input[type="password"]:focus,
+body[data-theme="dark"] textarea:focus,
+body[data-theme="dark"] select:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--color-highlight-violet) 55%, var(--color-border-strong));
+    box-shadow: var(--shadow-glow);
+}
+
+body[data-theme="dark"] input[type="radio"],
+body[data-theme="dark"] input[type="checkbox"] {
+    accent-color: var(--color-highlight-violet);
 }
 
 .tab-icon {
