@@ -2500,6 +2500,43 @@ function readConsumerOptions() {
     };
 }
 
+function wireConsumerStartModeHelp() {
+    const btn = document.getElementById('consumerStartModeHelpBtn');
+    const pop = document.getElementById('consumerStartModeHelpTooltip');
+    if (!btn || !pop) return;
+
+    function detachGlobalListeners() {
+        document.removeEventListener('click', onDocClick);
+        document.removeEventListener('keydown', onKeydown);
+    }
+
+    function setOpen(open) {
+        detachGlobalListeners();
+        pop.hidden = !open;
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) {
+            document.addEventListener('keydown', onKeydown);
+            setTimeout(() => {
+                document.addEventListener('click', onDocClick);
+            }, 0);
+        }
+    }
+
+    function onDocClick(ev) {
+        if (btn.contains(ev.target) || pop.contains(ev.target)) return;
+        setOpen(false);
+    }
+
+    function onKeydown(ev) {
+        if (ev.key === 'Escape') setOpen(false);
+    }
+
+    btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        setOpen(pop.hidden);
+    });
+}
+
 function wireConsumerControls() {
     loadConsumerTableViewPreference();
     const tableToggle = document.getElementById('consumerTableViewToggle');
@@ -2560,6 +2597,8 @@ function wireConsumerControls() {
             applyConsumerFormat(e.target.value);
         });
     }
+
+    wireConsumerStartModeHelp();
 }
 
 function wireTemplateControls() {

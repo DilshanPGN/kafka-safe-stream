@@ -179,21 +179,26 @@
                           <option value="xml">XML</option>
                           <option value="text">Plain text</option>
                       </select>
-                      <div class="template-toolbar">
-                          <label class="topic-label" for="templateSelect">Template</label>
-                          <select id="templateSelect">
-                              <option value="">— select template —</option>
-                          </select>
-                          <button id="loadTemplateButton" class="btn-secondary">Load</button>
-                          <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
-                          <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
-                          <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
-                          <div class="token-picker-wrapper">
-                              <select id="tokenInsertSelect" title="Insert random token">
-                                  <option value="">Insert token…</option>
-                              </select>
+                      <details class="producer-template-details">
+                          <summary class="producer-template-summary">Templates</summary>
+                          <div class="producer-template-details-body">
+                              <div class="template-toolbar">
+                                  <label class="topic-label" for="templateSelect">Template</label>
+                                  <select id="templateSelect">
+                                      <option value="">— select template —</option>
+                                  </select>
+                                  <button id="loadTemplateButton" class="btn-secondary">Load</button>
+                                  <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
+                                  <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
+                                  <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
+                                  <div class="token-picker-wrapper">
+                                      <select id="tokenInsertSelect" title="Insert random token">
+                                          <option value="">Insert token…</option>
+                                      </select>
+                                  </div>
+                              </div>
                           </div>
-                      </div>
+                      </details>
                   </div>
                   <div class="options-section" id="optionsConsumerSection">
                       <h4 class="options-subheading">Consumer</h4>
@@ -208,17 +213,26 @@
                                   </select>
                               </label>
                           </div>
-                          <div class="control-row options-row--basic-hide">
-                              <span class="control-label">Start from</span>
-                              <div class="radio-group" id="startModeGroup">
+                          <div class="control-row options-row--basic-hide consumer-start-from-row">
+                              <div class="start-from-label-wrap">
+                                  <div class="start-from-label-row">
+                                      <span class="control-label" id="startFromGroupLabel">Start from</span>
+                                      <button type="button" class="field-help-trigger" id="consumerStartModeHelpBtn" aria-label="Help: Start from options" aria-expanded="false" aria-controls="consumerStartModeHelpTooltip">
+                                          <svg class="field-help-trigger__icon" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                              <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+                                              <path d="M9.75 9.75a2.25 2.25 0 1 1 3.75 1.688c-.697.523-1.5 1.012-1.5 1.812V14M12 17h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+                                          </svg>
+                                      </button>
+                                  </div>
+                                  <div id="consumerStartModeHelpTooltip" class="consumer-start-mode-tooltip" role="tooltip" hidden>
+                                      <p class="consumer-start-mode-tooltip__text">“Now (latest)” only delivers messages produced <em>after</em> you start consuming. “Beginning” applies when the consumer group has <em>no</em> committed offsets; otherwise Kafka resumes from the last commit—use a <strong>new consumer group</strong> name (or reset offsets in Consumer lag) to read older data again.</p>
+                                  </div>
+                              </div>
+                              <div class="radio-group" id="startModeGroup" role="radiogroup" aria-labelledby="startFromGroupLabel">
                                   <label><input type="radio" name="startMode" value="latest"> Now (latest)</label>
                                   <label><input type="radio" name="startMode" value="earliest" checked> Beginning</label>
                                   <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
                               </div>
-                              <p class="field-hint consumer-start-mode-hint">“Now (latest)” only delivers messages produced <em>after</em> you start consuming. “Beginning” applies when the consumer group has <em>no</em> committed offsets; otherwise Kafka resumes from the last commit—use a <strong>new consumer group</strong> name (or reset offsets in Consumer lag) to read older data again.</p>
-                          </div>
-                          <div class="control-row basic-consumer-start-hint">
-                              <p class="field-hint">In <strong>Basic</strong> mode, the consumer always reads from the <strong>beginning</strong> of the topic. Use <strong>Advanced</strong> and “Start from” if you only want new messages.</p>
                           </div>
                           <div id="consumerOptionsConsumeSummary" class="consumer-consume-summary consumer-options-consume-summary options-row--basic-hide" hidden role="status" aria-live="polite"></div>
                           <div class="control-row offset-row options-row--basic-hide" id="offsetRow" style="display:none;">

@@ -312,15 +312,99 @@ body[data-app-mode="basic"] .options-consumer-controls .options-row--basic-hide 
     display: none !important;
 }
 
-body[data-app-mode="advanced"] .basic-consumer-start-hint {
+body[data-app-mode="basic"] #optionsProducerSection > .options-subheading {
     display: none !important;
 }
 
-.basic-consumer-start-hint .field-hint,
-.consumer-start-mode-hint {
-    margin: 6px 0 0;
+.start-from-label-wrap {
+    position: relative;
+    width: 100%;
+    z-index: 2;
+}
+
+.options-consumer-controls .consumer-start-from-row {
+    position: relative;
+    z-index: 1;
+}
+
+.options-consumer-controls .consumer-start-from-row:has(.consumer-start-mode-tooltip:not([hidden])) {
+    z-index: 5;
+}
+
+.start-from-label-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.field-help-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    margin: 0;
+    flex-shrink: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-bg-elev);
+    color: var(--color-text-muted);
+    cursor: pointer;
+}
+
+.field-help-trigger:hover {
+    color: var(--color-text);
+    border-color: var(--color-accent, var(--color-border));
+}
+
+.field-help-trigger[aria-expanded="true"] {
+    color: var(--color-accent-text, var(--color-text));
+    border-color: var(--color-accent, var(--color-border));
+    background: var(--color-bg-soft);
+}
+
+.field-help-trigger__icon {
+    display: block;
+}
+
+.consumer-start-mode-tooltip {
+    position: absolute;
+    z-index: 40;
+    top: calc(100% + 10px);
+    right: 0;
+    left: auto;
+    width: min(300px, 100%);
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-elev);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2);
+    pointer-events: auto;
+}
+
+.consumer-start-mode-tooltip::before {
+    content: '';
+    position: absolute;
+    top: -7px;
+    right: 13px;
+    width: 10px;
+    height: 10px;
+    background: var(--color-bg-elev);
+    border-left: 1px solid var(--color-border);
+    border-top: 1px solid var(--color-border);
+    transform: rotate(45deg);
+}
+
+.consumer-start-mode-tooltip__text {
+    position: relative;
+    z-index: 1;
+    margin: 0;
     line-height: 1.45;
     font-size: var(--ui-fs-caption);
+    color: var(--color-text-muted);
 }
 
 /* Consumer lag: offset reset/delete are advanced-only */
@@ -1372,6 +1456,24 @@ body.options-resizing * {
 
 #optionsProducerSection .format-select {
     margin-bottom: 10px;
+}
+
+.producer-template-details {
+    flex-shrink: 0;
+    margin-top: 4px;
+    border-top: 1px solid var(--color-border);
+    padding-top: 10px;
+}
+
+.producer-template-summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    font-size: var(--ui-fs-caption);
+}
+
+.producer-template-details-body {
+    margin-top: 10px;
 }
 
 .options-consumer-controls .format-inline {
