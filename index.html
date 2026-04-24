@@ -12,15 +12,15 @@
       content="default-src 'self'; script-src 'self' 'unsafe-eval'"
     />
     <link rel="stylesheet" href='codemirror/codemirror.css' rel='stylesheet'>
-    <link rel="stylesheet" href="codemirror/dracula.min.css">
     <title>Kafka Safe Stream</title>
     <link rel="stylesheet" href="styles.css">
     <script src="./renderer.js"></script>
     <script src='codemirror/codemirror.min.js'></script>
     <script src='codemirror/javascript.min.js'></script>
+    <script src='codemirror/xml.min.js'></script>
     <script src='codemirror/placeholder.min.js'></script>
 </head>
-<body>
+<body data-theme="dark" data-kss-unsafe-consumer-groups="false">
   <div id="loading-container">
       <span class="loader"></span>
   </div>
@@ -31,28 +31,382 @@
           <p id="custom-alert-message"></p>
       </div>
   </div>
-  <div id="container">
-      <div id="sidebar">
-      </div>
-      <div id="main">
-          <div id="tabs">
+  <div id="prompt-modal" class="custom-alert prompt-modal">
+      <div class="custom-alert-content prompt-content">
+          <span class="custom-alert-close" id="prompt-close">&times;</span>
+          <h3 id="prompt-title">Enter value</h3>
+          <p id="prompt-message"></p>
+          <input type="text" id="prompt-input" />
+          <div id="prompt-format-wrap" class="prompt-format-wrap" style="display: none;">
+              <label class="topic-label" for="prompt-format-select">File format</label>
+              <select id="prompt-format-select" class="format-select">
+                  <option value="json">JSON (.json)</option>
+                  <option value="jsonl">JSON Lines (.jsonl)</option>
+                  <option value="csv">CSV (.csv)</option>
+              </select>
           </div>
+          <div class="prompt-actions">
+              <button id="prompt-cancel" class="btn-secondary">Cancel</button>
+              <button id="prompt-confirm" class="btn-primary">OK</button>
+          </div>
+      </div>
+  </div>
+  <div id="kafka-auth-overlay" class="kafka-auth-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="kafka-auth-title">
+      <div class="kafka-auth-backdrop" data-kafka-auth-dismiss="1" aria-hidden="true"></div>
+      <div class="custom-alert prompt-modal kafka-auth-dialog">
+          <div class="custom-alert-content prompt-content">
+              <h3 id="kafka-auth-title">Kafka credentials</h3>
+              <p id="kafka-auth-context" class="kafka-auth-context"></p>
+              <p id="kafka-auth-error" class="kafka-auth-error"></p>
+              <div id="kafka-auth-group-password" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-password">Password</label>
+                  <input type="password" id="kafka-auth-password" autocomplete="current-password" />
+              </div>
+              <div id="kafka-auth-group-oauth" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-oauth">OAuth bearer access token</label>
+                  <textarea id="kafka-auth-oauth" rows="3" spellcheck="false" placeholder="Paste access token"></textarea>
+              </div>
+              <div id="kafka-auth-group-aws" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-aws-secret">AWS secret access key</label>
+                  <input type="password" id="kafka-auth-aws-secret" autocomplete="off" />
+                  <label for="kafka-auth-aws-session">Session token (optional)</label>
+                  <input type="password" id="kafka-auth-aws-session" autocomplete="off" />
+              </div>
+              <div id="kafka-auth-group-ssl" class="kafka-auth-field-group" style="display: none;">
+                  <label for="kafka-auth-ssl-pass">TLS client key passphrase (optional)</label>
+                  <input type="password" id="kafka-auth-ssl-pass" autocomplete="off" />
+              </div>
+              <label class="kafka-auth-remember"><input type="checkbox" id="kafka-auth-remember" checked /> Remember for this environment (encrypted when the OS supports it)</label>
+              <div class="kafka-auth-actions">
+                  <button type="button" id="kafka-auth-clear-saved" class="btn-secondary">Clear saved secrets</button>
+                  <span class="kafka-auth-actions-spacer"></span>
+                  <button type="button" id="kafka-auth-cancel" class="btn-secondary">Cancel</button>
+                  <button type="button" id="kafka-auth-submit" class="btn-primary">Connect</button>
+              </div>
+          </div>
+      </div>
+  </div>
+  <div id="consumer-idle-overlay" class="consumer-idle-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="consumer-idle-title">
+      <div class="consumer-idle-backdrop" aria-hidden="true"></div>
+      <div id="consumer-idle-dialog" class="custom-alert prompt-modal consumer-idle-modal">
+          <div class="custom-alert-content prompt-content">
+              <h3 id="consumer-idle-title">Are you still there?</h3>
+              <p id="consumer-idle-message">This window was in the background for a while while consuming. Choose an action below. If you do nothing, consuming will stop when the timer ends.</p>
+              <p id="consumer-idle-countdown" class="consumer-idle-countdown" aria-live="polite"></p>
+              <div class="prompt-actions consumer-idle-actions">
+                  <button type="button" id="consumer-idle-stop" class="btn-secondary">Stop consuming</button>
+                  <button type="button" id="consumer-idle-confirm" class="btn-primary">Yes, keep consuming</button>
+              </div>
+          </div>
+      </div>
+  </div>
+  <div id="container">
+      <aside id="sidebar">
+          <div class="sidebar-header">
+              <div class="brand" title="Kafka Safe Stream">
+                  <img src="./kss_logo.png" alt="KSS logo" class="brand-logo" />
+                  <span class="brand-text">KSS</span>
+              </div>
+              <button id="sidebarCollapseToggle" class="sidebar-collapse-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar" aria-pressed="false">
+                  <svg class="sidebar-collapse-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                      <path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+              </button>
+          </div>
+          <div id="tabs"></div>
+      </aside>
+      <div id="main">
+          <header id="topbar">
+              <div class="right-tools">
+                  <label class="env-switcher" for="envSelect">
+                      <span>Environment</span>
+                      <select id="envSelect"></select>
+                  </label>
+                  <label class="theme-switch" for="themeToggle" title="Toggle theme">
+                      <input type="checkbox" id="themeToggle" />
+                      <span class="theme-switch-inner">
+                          <span class="theme-mode" id="themeModeLabel">🌙 Dark</span>
+                          <span class="theme-slider" aria-hidden="true"></span>
+                      </span>
+                  </label>
+                  <div class="app-mode-group" role="group" aria-label="App mode">
+                      <button type="button" id="appModeBasic" class="toolbar-pill app-mode-pill" aria-pressed="false">Basic</button>
+                      <button type="button" id="appModeAdvanced" class="toolbar-pill app-mode-pill active" aria-pressed="true">Advanced</button>
+                  </div>
+                  <button id="setupButton" class="toolbar-pill toolbar-pill--icon" type="button" title="Options" aria-label="Options">
+                      <svg class="toolbar-cog" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                          <path stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+                          <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+                      </svg>
+                  </button>
+              </div>
+          </header>
+          <section id="summaryCards">
+              <div class="summary-card">
+                  <span class="summary-value" id="brokerCount">0</span>
+                  <span class="summary-label">Brokers</span>
+              </div>
+              <div class="summary-card">
+                  <span class="summary-value" id="topicCount">0</span>
+                  <span class="summary-label">Topics</span>
+              </div>
+              <div class="summary-card" id="summaryCardActiveEnv">
+                  <span class="summary-value" id="activeEnvName">-</span>
+                  <span class="summary-label">Active Env</span>
+              </div>
+              <div class="summary-card">
+                  <span class="summary-value" id="activeTopicName">-</span>
+                  <span class="summary-label">Selected Topic</span>
+              </div>
+              <div class="summary-card" id="summaryCardConsumerGroup">
+                  <span class="summary-value" id="activeGroupName">-</span>
+                  <span class="summary-label">Consumer Group</span>
+              </div>
+          </section>
           <div id="content">
               <div id="topics">
-                  <h3>TOPICS</h3>
+                  <h3>Options</h3>
+                  <div class="options-section" id="optionsTopicSection">
+                      <h4 class="options-subheading">Topic</h4>
+                      <label class="topic-label" for="topicSelect">Kafka topic</label>
+                      <select id="topicSelect"></select>
+                  </div>
+                  <div class="options-section" id="optionsProducerSection">
+                      <h4 class="options-subheading">Producer template</h4>
+                      <label class="topic-label" for="producerFormatSelect">Format</label>
+                      <select id="producerFormatSelect" class="format-select">
+                          <option value="json">JSON</option>
+                          <option value="xml">XML</option>
+                          <option value="text">Plain text</option>
+                      </select>
+                      <details class="producer-template-details">
+                          <summary class="producer-template-summary">Templates</summary>
+                          <div class="producer-template-details-body">
+                              <div class="template-toolbar">
+                                  <label class="topic-label" for="templateSelect">Template</label>
+                                  <select id="templateSelect">
+                                      <option value="">— select template —</option>
+                                  </select>
+                                  <button id="loadTemplateButton" class="btn-secondary">Load</button>
+                                  <button id="updateTemplateButton" class="btn-secondary" disabled>Update</button>
+                                  <button id="saveTemplateButton" class="btn-secondary">Save as…</button>
+                                  <button id="deleteTemplateButton" class="btn-danger" disabled>Delete</button>
+                                  <div class="token-picker-wrapper">
+                                      <select id="tokenInsertSelect" title="Insert random token">
+                                          <option value="">Insert token…</option>
+                                      </select>
+                                  </div>
+                              </div>
+                          </div>
+                      </details>
+                  </div>
+                  <div class="options-section" id="optionsConsumerSection">
+                      <h4 class="options-subheading">Consumer</h4>
+                      <div class="consumer-controls options-consumer-controls">
+                          <div class="control-row">
+                              <label class="control-inline format-inline">
+                                  <span>Display format</span>
+                                  <select id="consumerFormatSelect" class="format-select">
+                                      <option value="json">JSON</option>
+                                      <option value="xml">XML</option>
+                                      <option value="text">Plain text</option>
+                                  </select>
+                              </label>
+                          </div>
+                          <div class="control-row options-row--basic-hide consumer-start-from-row">
+                              <div class="start-from-label-wrap">
+                                  <div class="start-from-label-row">
+                                      <span class="control-label" id="startFromGroupLabel">Start from</span>
+                                      <button type="button" class="field-help-trigger" id="consumerStartModeHelpBtn" aria-label="Help: Start from options" aria-expanded="false" aria-controls="consumerStartModeHelpTooltip">
+                                          <svg class="field-help-trigger__icon" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                              <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+                                              <path d="M9.75 9.75a2.25 2.25 0 1 1 3.75 1.688c-.697.523-1.5 1.012-1.5 1.812V14M12 17h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+                                          </svg>
+                                      </button>
+                                  </div>
+                                  <div id="consumerStartModeHelpTooltip" class="consumer-start-mode-tooltip" role="tooltip" hidden>
+                                      <p class="consumer-start-mode-tooltip__text">“Now (latest)” only delivers messages produced <em>after</em> you start consuming. “Beginning” applies when the consumer group has <em>no</em> committed offsets; otherwise Kafka resumes from the last commit—use a <strong>new consumer group</strong> name (or reset offsets in Consumer lag) to read older data again.</p>
+                                  </div>
+                              </div>
+                              <div class="radio-group" id="startModeGroup" role="radiogroup" aria-labelledby="startFromGroupLabel">
+                                  <label><input type="radio" name="startMode" value="latest"> Now (latest)</label>
+                                  <label><input type="radio" name="startMode" value="earliest" checked> Beginning</label>
+                                  <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
+                              </div>
+                          </div>
+                          <div id="consumerOptionsConsumeSummary" class="consumer-consume-summary consumer-options-consume-summary options-row--basic-hide" hidden role="status" aria-live="polite"></div>
+                          <div class="control-row offset-row options-row--basic-hide" id="offsetRow" style="display:none;">
+                              <label class="control-inline">
+                                  <span>Partition</span>
+                                  <select id="partitionSelect">
+                                      <option value="">All partitions</option>
+                                  </select>
+                              </label>
+                              <label class="control-inline">
+                                  <span>Offset</span>
+                                  <input type="number" id="offsetInput" min="0" placeholder="0" />
+                              </label>
+                              <button id="refreshPartitionsButton" class="btn-secondary" title="Refresh partitions for this topic">↻</button>
+                          </div>
+                          <div class="control-row">
+                              <label class="control-inline">
+                                  <span>Max messages</span>
+                                  <input type="number" id="maxMessagesInput" min="1" placeholder="unlimited" />
+                              </label>
+                          </div>
+                          <div class="control-row options-row--basic-hide">
+                              <label class="control-inline group-inline">
+                                  <span>Consumer group</span>
+                                  <input type="text" id="consumerGroupInput" placeholder="kafka-safe-stream-group" />
+                              </label>
+                          </div>
+                          <div class="control-row">
+                              <span class="control-label" id="consumerTableViewGroupLabel">Message view</span>
+                              <div class="radio-group" role="group" aria-labelledby="consumerTableViewGroupLabel">
+                                  <label class="control-checkbox consumer-table-view-option" for="consumerTableViewToggle">
+                                      <input type="checkbox" id="consumerTableViewToggle" />
+                                      <span class="consumer-table-view-option__text">Table view (metadata columns)</span>
+                                  </label>
+                              </div>
+                          </div>
+                      </div>
+                  </div>
+                  <div id="optionsResizer" class="options-resizer" role="separator" aria-orientation="vertical" aria-label="Resize options panel"></div>
               </div>
               <div id="producerContainer">
+                  <div class="panel-heading">Producer Payload</div>
                   <div id="payload"></div>
-                  <div id="actions">
+                  <div class="actions">
                       <button id="formatButton" disabled>Format</button>
                       <button id="produceButton" disabled>Produce to Topic</button>
                   </div>
               </div>
               <div id="consumerContainer">
-                  <div id="consumedMessages"></div>
-                  <div id="actions">
+                  <div class="panel-heading">Consumed Messages</div>
+                  <div class="consumer-controls">
+                      <div class="control-row">
+                          <label class="control-inline filter-inline">
+                              <span>Filter</span>
+                              <input type="text" id="filterInput" placeholder="Search consumed messages…" />
+                          </label>
+                          <label class="control-checkbox">
+                              <input type="checkbox" id="filterRegex" /> Regex
+                          </label>
+                          <span id="messageCount" class="message-count">0 / 0</span>
+                      </div>
+                  </div>
+                  <div id="consumerConsumeSummary" class="consumer-consume-summary" hidden role="status" aria-live="polite"></div>
+                  <div id="consumerFetchStatus" class="consumer-fetch-status" role="status" aria-live="polite"></div>
+                  <div id="consumerMessagesPanel" class="consumer-messages-panel">
+                      <div id="consumedMessages" class="consumer-messages-cm-host"></div>
+                      <div id="consumedMessagesTableWrap" class="consumer-messages-table-wrap" hidden>
+                          <div class="consumer-messages-table-scroll">
+                              <table class="consumer-messages-table" aria-label="Consumed messages">
+                                  <thead id="consumedMessagesTableHead"></thead>
+                                  <tbody id="consumedMessagesTableBody"></tbody>
+                              </table>
+                          </div>
+                      </div>
+                  </div>
+                  <div class="actions">
+                      <button type="button" id="exportConsumedButton" class="btn-secondary">Export</button>
                       <button id="clearMessages">Clear</button>
                       <button id="consumeButton">Start Consuming</button>
+                  </div>
+              </div>
+              <div id="topicsBrowserContainer">
+                  <div class="panel-heading">Topics &amp; Partitions</div>
+                  <div class="topics-toolbar">
+                      <input type="text" id="topicsSearchInput" placeholder="Search topics…" />
+                      <button id="refreshTopicsButton" class="btn-secondary">↻ Refresh</button>
+                      <span id="topicsCount" class="message-count">0 topics</span>
+                  </div>
+                  <div id="topicsTableWrapper" class="topics-table-wrapper">
+                      <table id="topicsTable" class="topics-table">
+                          <thead>
+                              <tr>
+                                  <th>Topic</th>
+                                  <th>Partitions</th>
+                                  <th>Replication</th>
+                                  <th>Leaders</th>
+                                  <th>Messages</th>
+                                  <th>Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody id="topicsTableBody"></tbody>
+                      </table>
+                      <div id="topicsEmptyState" class="topics-empty">No topics loaded. Click Refresh to load.</div>
+                  </div>
+              </div>
+              <div id="consumerLagContainer">
+                  <div class="panel-heading">Consumer groups &amp; lag</div>
+                  <p class="lag-hint">Pick a topic, then load committed offsets for every consumer group in the cluster. Only groups with at least one committed offset on this topic are listed. Large clusters may take a while. Resetting offsets or deleting groups is hidden by default; enable only by setting <code>allowedUnsafeOperations</code> to <code>true</code> for this environment in the config JSON (file or Setup → Advanced → edit JSON).</p>
+                  <div class="lag-toolbar">
+                      <label class="topic-label" for="lagTopicSelect">Topic</label>
+                      <select id="lagTopicSelect"></select>
+                      <button id="lagLoadButton" type="button" class="btn-primary">Load</button>
+                  </div>
+                  <div id="lagStatus" class="lag-status"></div>
+                  <div id="lagTableWrapper" class="topics-table-wrapper">
+                      <table id="lagTable" class="topics-table">
+                          <thead>
+                              <tr>
+                                  <th>Consumer group</th>
+                                  <th>State</th>
+                                  <th>Members</th>
+                                  <th>Clients</th>
+                                  <th>Partition</th>
+                                  <th>Committed</th>
+                                  <th>Log end</th>
+                                  <th>Lag</th>
+                                  <th class="lag-col-actions">Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody id="lagTableBody"></tbody>
+                      </table>
+                      <div id="lagEmptyState" class="topics-empty">Select a topic and click Load.</div>
+                  </div>
+              </div>
+              <div id="clusterInfoContainer">
+                  <div class="panel-heading">Cluster Metadata</div>
+                  <p class="cluster-hint">Metadata from the Kafka metadata API (brokers, controller, topic count, topic/partition health). JVM health and per-broker metrics require external monitoring (e.g. JMX / Prometheus exporters).</p>
+                  <div class="cluster-toolbar">
+                      <button id="clusterRefreshButton" type="button" class="btn-secondary">↻ Refresh</button>
+                      <span id="clusterStatus" class="lag-status"></span>
+                  </div>
+                  <div class="cluster-summary" id="clusterSummary"></div>
+                  <div class="panel-subheading topic-health-heading">Topic health summary</div>
+                  <p class="cluster-hint cluster-hint--tight">Under-replicated = partition has fewer in-sync replicas than assigned replicas. No leader = leader id missing or invalid in metadata. Errors = non-zero partition error code from the broker.</p>
+                  <div class="cluster-summary" id="topicHealthStats"></div>
+                  <div class="topics-table-wrapper topic-health-table-wrap">
+                      <table class="topics-table" id="topicHealthTable">
+                          <thead>
+                              <tr>
+                                  <th>Topic</th>
+                                  <th>Partitions</th>
+                                  <th>Under-replicated</th>
+                                  <th>No leader</th>
+                                  <th>Metadata errors</th>
+                              </tr>
+                          </thead>
+                          <tbody id="topicHealthBody"></tbody>
+                      </table>
+                      <div id="topicHealthEmpty" class="topics-empty" style="display: none;"></div>
+                  </div>
+                  <p id="topicHealthTruncated" class="cluster-trunc-note"></p>
+                  <div class="panel-subheading cluster-brokers-heading">Brokers</div>
+                  <div class="topics-table-wrapper cluster-brokers-wrap">
+                      <table class="topics-table" id="clusterBrokersTable">
+                          <thead>
+                              <tr>
+                                  <th>Node</th>
+                                  <th>Host:port</th>
+                                  <th>Role</th>
+                                  <th>Bootstrap match</th>
+                              </tr>
+                          </thead>
+                          <tbody id="clusterBrokersBody"></tbody>
+                      </table>
                   </div>
               </div>
           </div>

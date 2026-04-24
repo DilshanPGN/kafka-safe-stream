@@ -1,0 +1,72 @@
+:root {
+    /* Light theme: softer canvas, no pure white chrome, borders you can actually see */
+    --color-bg: #e4e9f2;
+    --color-bg-elev: #f5f7fb;
+    --color-bg-soft: #e9edf6;
+    --color-bg-muted: #dde3ef;
+    --color-border: #b4c0d4;
+    --color-border-strong: #8f9eb8;
+    --color-text: #0f172a;
+    --color-text-muted: #5b6b85;
+    --color-text-subtle: #8392ab;
+    --color-heading: #0b1736;
+    --color-accent: #4f46e5;
+    --color-accent-strong: #4338ca;
+    --color-accent-soft: #eef0ff;
+    --color-accent-text: #ffffff;
+    --color-success: #10b981;
+    --color-danger: #ef4444;
+    --color-warning: #f59e0b;
+    --color-info: #0ea5e9;
+    --color-highlight-violet: #8a7bff;
+    --color-highlight-blue: #5699ff;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.07), 0 2px 8px rgba(15, 23, 42, 0.05);
+    --shadow-md: 0 6px 20px rgba(15, 23, 42, 0.09);
+    --shadow-glow: 0 0 0 1px rgba(79, 70, 229, 0.18);
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 14px;
+    --transition: 160ms ease;
+    --cm-string: #0f7d4d;
+    --cm-number: #a91b8e;
+    --cm-keyword: #1d4ed8;
+    --cm-atom: #a91b8e;
+    --cm-property: #0b5394;
+    --cm-variable: #0f172a;
+    --cm-comment: #6b7280;
+    --cm-meta: #6b7280;
+    --cm-bracket: #0f172a;
+    --cm-selection: rgba(79, 70, 229, 0.18);
+}
+
+body[data-theme="dark"] {
+    --color-bg: #060606;
+    --color-bg-elev: #101010;
+    --color-bg-soft: #171717;
+    --color-bg-muted: #1f1f1f;
+    --color-border: #2a2a2a;
+    --color-border-strong: #3a3a3a;
+    --color-text: #efefef;
+    --color-text-muted: #b2b2b2;
+    --color-text-subtle: #8c8c8c;
+    --color-heading: #ffffff;
+    --color-accent: #2d2d2d;
+    --color-accent-strong: #3d3d3d;
+    --color-accent-soft: rgba(255, 255, 255, 0.08);
+    --color-accent-text: #f8fafc;
+    --color-highlight-violet: #8a7bff;
+    --color-highlight-blue: #5699ff;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+    --shadow-glow: 0 0 0 1px rgba(138, 123, 255, 0.35), 0 0 0 3px rgba(86, 153, 255, 0.14);
+    --cm-string: #a6e3a1;
+    --cm-number: #f5c2e7;
+    --cm-keyword: #d0d0d0;
+    --cm-atom: #bfbfbf;
+    --cm-property: #e2e2e2;
+    --cm-variable: #dddddd;
+    --cm-comment: #777777;
+    --cm-meta: #9d9d9d;
+    --cm-bracket: #dddddd;
+    --cm-selection: rgba(255, 255, 255, 0.16);
+}

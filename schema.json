@@ -13,6 +13,31 @@
                 "topicList": {
                     "type": "array",
                     "items": { "type": "string" }
+                },
+                "allowedUnsafeOperations": {
+                    "type": "boolean",
+                    "description": "When true, enables consumer-group offset reset and delete-group actions in the app. Set only by editing config JSON, not the setup form."
+                },
+                "connection": {
+                    "type": "object",
+                    "properties": {
+                        "securityProtocol": {
+                            "type": "string",
+                            "enum": ["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"]
+                        },
+                        "saslMechanism": {
+                            "type": "string",
+                            "enum": ["none", "plain", "scram-sha-256", "scram-sha-512", "oauthbearer", "aws"]
+                        },
+                        "username": { "type": "string" },
+                        "awsAccessKeyId": { "type": "string" },
+                        "awsAuthorizationIdentity": { "type": "string" },
+                        "rejectUnauthorized": { "type": "boolean" },
+                        "caFile": { "type": "string" },
+                        "certFile": { "type": "string" },
+                        "keyFile": { "type": "string" }
+                    },
+                    "additionalProperties": false
                 }
             },
             "required": ["id", "label", "brokers", "topicList"],

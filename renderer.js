@@ -1,53 +1,727 @@
 const { ipcRenderer } = require('electron');
-const { createKafkaClient, produceMessage, stopConsuming, consumeMessages } = require("./backend/kafka");
+const {
+    createKafkaClient,
+    produceMessage,
+    disconnectProducer,
+    stopConsuming,
+    consumeMessages,
+    getTopicsAndPartitions,
+    getTopicOffsets,
+    getConsumerLagOverview,
+    resetConsumerGroupOffsetsToLatest,
+    deleteConsumerGroups,
+    appendOffsetResetAudit,
+    getClusterMetadata,
+} = require('./backend/kafka');
+const { normalizeConnection, connectionFingerprint, isKafkaAuthError } = require('./backend/kafkaConnection');
+const templatesApi = require('./backend/templates');
+const { expandTokens, TOKEN_INSERT_OPTIONS } = require('./backend/randomTokens');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const Ajv = require('ajv');
 
-const method = {
-    'producer': {
-        id: 'producer',
-        label: 'Producer',
-        containerId: 'producerContainer'
-    },
-    'consumer': {
-        id: 'consumer',
-        label: '⚫ Consumer',
-        containerId: 'consumerContainer'
-    }
-}
+const TAB_ICONS = {
+    producer: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M22 2 11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 2 15 22l-4-9-9-4 20-7Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    consumer: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 14v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 15V3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    topicsBrowser: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4" cy="6" r="1" fill="currentColor"/><circle cx="4" cy="12" r="1" fill="currentColor"/><circle cx="4" cy="18" r="1" fill="currentColor"/></svg>',
+    consumerLag: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 12a9 9 0 1 1 18 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 12 16 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>',
+    clusterInfo: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="3" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="3" y="15" width="18" height="6" rx="1.5" stroke="currentColor" stroke-width="2"/><circle cx="7" cy="6" r="1" fill="currentColor"/><circle cx="7" cy="18" r="1" fill="currentColor"/></svg>',
+};
 
-// Load the schema from file
+const method = {
+    producer: {
+        id: 'producer',
+        label: 'Produce',
+        containerId: 'producerContainer',
+        icon: TAB_ICONS.producer,
+    },
+    consumer: {
+        id: 'consumer',
+        label: 'Consume',
+        containerId: 'consumerContainer',
+        icon: TAB_ICONS.consumer,
+    },
+    topicsBrowser: {
+        id: 'topicsBrowser',
+        label: 'Topics',
+        containerId: 'topicsBrowserContainer',
+        icon: TAB_ICONS.topicsBrowser,
+    },
+    consumerLag: {
+        id: 'consumerLag',
+        label: 'Consumer lag',
+        containerId: 'consumerLagContainer',
+        icon: TAB_ICONS.consumerLag,
+    },
+    clusterInfo: {
+        id: 'clusterInfo',
+        label: 'Cluster',
+        containerId: 'clusterInfoContainer',
+        icon: TAB_ICONS.clusterInfo,
+    },
+};
+
 const schemaPath = path.join(__dirname, 'schema.json');
 const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 
 const ajv = new Ajv();
-const kafkaSafeStreamGroup = 'kafka-safe-stream-group';
+const DEFAULT_GROUP = 'kafka-safe-stream-group';
 const LINE_SEPARATOR = '\n\n◀▶\n\n';
+const THEME_STORAGE_KEY = 'kss-theme';
+const APP_MODE_STORAGE_KEY = 'kss-app-mode';
+const PREFS_PATH = path.join(os.homedir(), '.kss', 'preferences.json');
+
+function logDebug(context, err) {
+    if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+        console.debug(`[kss] ${context}`, err);
+    }
+}
+
+const PAYLOAD_FORMATS = {
+    json: { id: 'json', label: 'JSON', cmMode: { name: 'javascript', json: true } },
+    xml: { id: 'xml', label: 'XML', cmMode: 'xml' },
+    text: { id: 'text', label: 'Plain text', cmMode: null },
+};
+const DEFAULT_FORMAT = 'json';
+const PRODUCER_FORMAT_STORAGE_KEY = 'kss-producer-format';
+const CONSUMER_FORMAT_STORAGE_KEY = 'kss-consumer-format';
 
 let activeEnv = null;
 let activeMethod = 'producer';
 let activeTopicList = null;
-let activeTopic = '';
+let producerTopic = '';
+let consumerTopic = '';
 let consumeStarted = false;
 let envConfig = null;
 let validPayload = false;
 let editor = null;
 let consumer = null;
+let consumerBlinkOn = false;
+let consumerGroup = DEFAULT_GROUP;
+let topicsCache = [];
+let consumedMessages = [];
+let selectedTemplateId = '';
+let producerFormat = DEFAULT_FORMAT;
+let consumerFormat = DEFAULT_FORMAT;
+let kafkaClientCache = { key: null, client: null };
+/** Session-only credential fields per env (override encrypted store). */
+let sessionSecretsByEnv = {};
+/** Bumped when secrets change so the Kafka client is rebuilt. */
+let secretEpochByEnv = {};
+let rendererInitialized = false;
+let pendingConfigUpdate = null;
 window.refreshIntervalId = null;
+let lagTopic = '';
+let lagOverviewData = null;
+let lagResetInFlight = false;
+/** When true, consumed messages render as a table instead of CodeMirror. */
+let consumerTableView = false;
+/** Last rows rendered in the consumer table (for “View payload” window). */
+let lastConsumerTableFilteredSnapshot = [];
+
+function isUnsafeConsumerGroupOpsAllowed() {
+    if (!envConfig || !activeEnv) return false;
+    const env = envConfig[activeEnv];
+    return Boolean(env && env.allowedUnsafeOperations === true);
+}
+
+function syncUnsafeConsumerGroupBodyAttr() {
+    document.body.setAttribute(
+        'data-kss-unsafe-consumer-groups',
+        isUnsafeConsumerGroupOpsAllowed() ? 'true' : 'false',
+    );
+}
+let consumerTablePayloadClickBound = false;
+let consumerBlurIdleTimerId = null;
+let consumerIdleCountdownIntervalId = null;
+let consumerIdleModalActive = false;
+let appMode = 'advanced';
+let consumerSeekHintTimerId = null;
+
+function loadPreferences() {
+    try {
+        if (fs.existsSync(PREFS_PATH)) {
+            const raw = fs.readFileSync(PREFS_PATH, 'utf8');
+            return JSON.parse(raw) || {};
+        }
+    } catch (err) {
+        logDebug('preferences read', err);
+    }
+    return {};
+}
+
+function savePreferences(prefs) {
+    try {
+        const dir = path.dirname(PREFS_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2), 'utf8');
+    } catch (err) {
+        console.warn('Failed to persist preferences', err);
+    }
+}
+
+/**
+ * preferences.json (~/.kss/preferences.json) also stores:
+ * - lastActiveEnvId — environment restored on startup
+ * - lastActiveMethodByEnv — map of env id → last main tab (producer, consumer, …)
+ * - lastActiveMethod — global fallback for the active tab
+ * - consumerTableView — show consumer messages as metadata table vs stream editor
+ *
+ * Consumer background-idle:
+ * consumerIdle.blurUnfocusedMinutes — unfocused time before "still there?" (default 60 = 1 hour).
+ * consumerIdle.promptResponseMinutes — countdown before auto-stop if no confirmation (default 3).
+ */
+function getConsumerIdlePrefs() {
+    const prefs = loadPreferences();
+    const raw = prefs.consumerIdle || {};
+    let blurMin = Number(raw.blurUnfocusedMinutes);
+    let responseMin = Number(raw.promptResponseMinutes);
+    if (!Number.isFinite(blurMin) || blurMin <= 0) blurMin = 60;
+    if (!Number.isFinite(responseMin) || responseMin <= 0) responseMin = 3;
+    const blurMs = blurMin * 60 * 1000;
+    const maxMs = 2147483647;
+    return {
+        blurUnfocusedMs: Math.min(blurMs, maxMs),
+        promptResponseSec: Math.round(responseMin * 60),
+    };
+}
+
+function getGroupForTopic(envId, topic) {
+    const prefs = loadPreferences();
+    return (prefs.groupsByTopic && prefs.groupsByTopic[`${envId}::${topic}`]) || DEFAULT_GROUP;
+}
+
+function setGroupForTopic(envId, topic, group) {
+    const prefs = loadPreferences();
+    prefs.groupsByTopic = prefs.groupsByTopic || {};
+    prefs.groupsByTopic[`${envId}::${topic}`] = group;
+    savePreferences(prefs);
+}
+
+function readLastMethodForEnv(envId) {
+    const prefs = loadPreferences();
+    const byEnv = prefs.lastActiveMethodByEnv;
+    let cand = (byEnv && typeof byEnv === 'object' && byEnv[envId]) || prefs.lastActiveMethod || 'producer';
+    cand = String(cand);
+    if (!method[cand]) cand = 'producer';
+    return cand;
+}
+
+function resolveMethodForEnv(envId) {
+    let m = readLastMethodForEnv(envId);
+    if (!isMethodVisibleInAppMode(method[m])) {
+        const visible = Object.values(method).filter(isMethodVisibleInAppMode);
+        m = visible[0] ? visible[0].id : 'producer';
+    }
+    return m;
+}
+
+function persistLastMethodForEnv(envId, methodId) {
+    if (!envId || !methodId) return;
+    const prefs = loadPreferences();
+    prefs.lastActiveMethodByEnv = prefs.lastActiveMethodByEnv && typeof prefs.lastActiveMethodByEnv === 'object'
+        ? prefs.lastActiveMethodByEnv
+        : {};
+    prefs.lastActiveMethodByEnv[envId] = methodId;
+    prefs.lastActiveMethod = methodId;
+    savePreferences(prefs);
+}
+
+function persistLastEnv(envId) {
+    if (!envId) return;
+    const prefs = loadPreferences();
+    prefs.lastActiveEnvId = envId;
+    savePreferences(prefs);
+}
+
+function invalidateKafkaClientCache() {
+    const prev = kafkaClientCache.client;
+    kafkaClientCache = { key: null, client: null };
+    if (prev) {
+        disconnectProducer(prev).catch((err) => logDebug('disconnectProducer', err));
+    }
+}
+
+function bumpSecretEpoch(envId) {
+    if (!envId) return;
+    secretEpochByEnv[envId] = (secretEpochByEnv[envId] || 0) + 1;
+}
+
+async function mergeKafkaSecretsForEnv(envId) {
+    let disk = {};
+    try {
+        const d = await ipcRenderer.invoke('kss-credentials:get', { envId });
+        if (d && typeof d === 'object') disk = { ...d };
+    } catch (err) {
+        logDebug('kss-credentials:get', err);
+    }
+    const sess = sessionSecretsByEnv[envId] || {};
+    return { ...disk, ...sess };
+}
+
+function hasAnyKafkaSecret(secrets) {
+    if (!secrets || typeof secrets !== 'object') return false;
+    return Boolean(
+        secrets.password
+        || secrets.oauthAccessToken
+        || secrets.awsSecretAccessKey
+        || secrets.sslKeyPassphrase,
+    );
+}
+
+async function getKafkaClient() {
+    const env = envConfig[activeEnv];
+    if (!env) {
+        throw new Error('No environment selected');
+    }
+    const connection = normalizeConnection(env.connection);
+    const secrets = await mergeKafkaSecretsForEnv(activeEnv);
+    const hasSecret = hasAnyKafkaSecret(secrets);
+    const epoch = secretEpochByEnv[activeEnv] || 0;
+    const fp = `${activeEnv}|${epoch}|${connectionFingerprint(connection, env.brokers, hasSecret)}`;
+    if (kafkaClientCache.key === fp && kafkaClientCache.client) {
+        return kafkaClientCache.client;
+    }
+    const client = createKafkaClient(env.brokers, { connection, secrets });
+    kafkaClientCache = { key: fp, client };
+    return client;
+}
+
+/**
+ * @param {{ topicLabel?: string, error: Error, connection: ReturnType<typeof normalizeConnection> }} args
+ * @returns {Promise<null|{ remember: boolean, password?: string, oauthAccessToken?: string, awsSecretAccessKey?: string, awsSessionToken?: string, sslKeyPassphrase?: string }>}
+ */
+function showKafkaCredentialModal(args) {
+    const { topicLabel, error, connection } = args;
+    return new Promise((resolve) => {
+        const overlay = document.getElementById('kafka-auth-overlay');
+        const ctx = document.getElementById('kafka-auth-context');
+        const errEl = document.getElementById('kafka-auth-error');
+        const gPass = document.getElementById('kafka-auth-group-password');
+        const gOauth = document.getElementById('kafka-auth-group-oauth');
+        const gAws = document.getElementById('kafka-auth-group-aws');
+        const gSsl = document.getElementById('kafka-auth-group-ssl');
+        const inPass = document.getElementById('kafka-auth-password');
+        const inOauth = document.getElementById('kafka-auth-oauth');
+        const inAwsSec = document.getElementById('kafka-auth-aws-secret');
+        const inAwsTok = document.getElementById('kafka-auth-aws-session');
+        const inSsl = document.getElementById('kafka-auth-ssl-pass');
+        const remember = document.getElementById('kafka-auth-remember');
+        const btnOk = document.getElementById('kafka-auth-submit');
+        const btnCancel = document.getElementById('kafka-auth-cancel');
+        const btnClear = document.getElementById('kafka-auth-clear-saved');
+        const backdrop = overlay && overlay.querySelector('[data-kafka-auth-dismiss]');
+        if (!overlay || !ctx || !errEl || !btnOk || !btnCancel) {
+            resolve(null);
+            return;
+        }
+
+        const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+            || connection.securityProtocol === 'SASL_SSL';
+        const mech = connection.saslMechanism;
+        const showPass = useSasl && (mech === 'plain' || mech === 'scram-sha-256' || mech === 'scram-sha-512');
+        const showOauth = useSasl && mech === 'oauthbearer';
+        const showAws = useSasl && mech === 'aws';
+        const showSsl = Boolean(connection.keyFile && String(connection.keyFile).trim());
+
+        ctx.textContent = topicLabel
+            ? `The cluster rejected the connection while using topic "${topicLabel}". Enter credentials for environment "${activeEnv}".`
+            : `The cluster rejected the connection. Enter credentials for environment "${activeEnv}".`;
+        errEl.textContent = (error && error.message) ? String(error.message) : 'Authentication or TLS error';
+
+        gPass.style.display = showPass ? 'block' : 'none';
+        gOauth.style.display = showOauth ? 'block' : 'none';
+        gAws.style.display = showAws ? 'block' : 'none';
+        gSsl.style.display = showSsl ? 'block' : 'none';
+
+        inPass.value = '';
+        inOauth.value = '';
+        inAwsSec.value = '';
+        inAwsTok.value = '';
+        inSsl.value = '';
+        remember.checked = true;
+
+        const cleanup = (value) => {
+            overlay.style.display = 'none';
+            btnOk.removeEventListener('click', onOk);
+            btnCancel.removeEventListener('click', onCancel);
+            if (btnClear) btnClear.removeEventListener('click', onClear);
+            if (backdrop) backdrop.removeEventListener('click', onCancel);
+            resolve(value);
+        };
+
+        const onCancel = () => cleanup(null);
+
+        const onClear = async () => {
+            try {
+                await ipcRenderer.invoke('kss-credentials:clear', { envId: activeEnv });
+            } catch (err) {
+                logDebug('kss-credentials:clear', err);
+            }
+            delete sessionSecretsByEnv[activeEnv];
+            bumpSecretEpoch(activeEnv);
+            invalidateKafkaClientCache();
+            showAlert('Saved secrets', 'Stored credentials for this environment were cleared.');
+        };
+
+        const onOk = () => {
+            const out = { remember: remember.checked };
+            if (showPass) out.password = String(inPass.value || '');
+            if (showOauth) out.oauthAccessToken = String(inOauth.value || '').trim();
+            if (showAws) {
+                out.awsSecretAccessKey = String(inAwsSec.value || '');
+                out.awsSessionToken = String(inAwsTok.value || '');
+            }
+            if (showSsl) out.sslKeyPassphrase = String(inSsl.value || '');
+            if (showPass && !out.password) {
+                showAlert('Credentials', 'Password is required.');
+                return;
+            }
+            if (showOauth && !out.oauthAccessToken) {
+                showAlert('Credentials', 'Access token is required.');
+                return;
+            }
+            if (showAws && !out.awsSecretAccessKey) {
+                showAlert('Credentials', 'AWS secret access key is required.');
+                return;
+            }
+            cleanup(out);
+        };
+
+        btnOk.addEventListener('click', onOk);
+        btnCancel.addEventListener('click', onCancel);
+        if (btnClear) btnClear.addEventListener('click', onClear);
+        if (backdrop) backdrop.addEventListener('click', onCancel);
+
+        overlay.style.display = 'flex';
+        setTimeout(() => {
+            if (showPass) inPass.focus();
+            else if (showOauth) inOauth.focus();
+            else if (showAws) inAwsSec.focus();
+            else if (showSsl) inSsl.focus();
+            else btnOk.focus();
+        }, 50);
+    });
+}
+
+async function persistKafkaSecretsFromModal(envId, formPayload, remember) {
+    const fp = { ...(formPayload || {}) };
+    delete fp.remember;
+    if (!remember) {
+        sessionSecretsByEnv[envId] = { ...(sessionSecretsByEnv[envId] || {}), ...fp };
+        return;
+    }
+    let disk = {};
+    try {
+        const d = await ipcRenderer.invoke('kss-credentials:get', { envId });
+        if (d && typeof d === 'object') disk = { ...d };
+    } catch (err) {
+        logDebug('kss-credentials:get merge', err);
+    }
+    const merged = { ...disk, ...fp };
+    await ipcRenderer.invoke('kss-credentials:set', { envId, payload: merged });
+    delete sessionSecretsByEnv[envId];
+}
+
+/**
+ * Run a Kafka operation; on auth/TLS failure prompt for secrets and retry (bounded).
+ * @param {string} topicLabel
+ * @param {(kafka: import('kafkajs').Kafka) => Promise<unknown>} fn
+ */
+async function withKafkaAuthRecovery(topicLabel, fn) {
+    const maxRounds = 3;
+    for (let round = 0; round < maxRounds; round += 1) {
+        try {
+            const kafka = await getKafkaClient();
+            return await fn(kafka);
+        } catch (err) {
+            if (!isKafkaAuthError(err) || !activeEnv || !envConfig[activeEnv]) {
+                throw err;
+            }
+            const connection = normalizeConnection(envConfig[activeEnv].connection);
+            const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+                || connection.securityProtocol === 'SASL_SSL';
+            const mech = connection.saslMechanism;
+            const needModal = (useSasl && mech !== 'none')
+                || (Boolean(connection.keyFile && String(connection.keyFile).trim()));
+            if (!needModal) {
+                throw err;
+            }
+            const form = await showKafkaCredentialModal({ topicLabel, error: err, connection });
+            if (!form) throw err;
+            await persistKafkaSecretsFromModal(activeEnv, form, form.remember);
+            bumpSecretEpoch(activeEnv);
+            invalidateKafkaClientCache();
+        }
+    }
+    throw new Error('Kafka authentication failed after multiple attempts.');
+}
+
+async function disconnectAdminQuiet(admin) {
+    try {
+        await admin.disconnect();
+    } catch (err) {
+        logDebug('admin.disconnect', err);
+    }
+}
+
+/** Minimal broker auth check (SASL/TLS) before starting a long-lived consumer. */
+async function pingKafkaAuth(kafka) {
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+    } finally {
+        await disconnectAdminQuiet(admin);
+    }
+}
+
+function applyTheme(theme) {
+    const targetTheme = theme === 'light' ? 'light' : 'dark';
+    document.body.setAttribute('data-theme', targetTheme);
+    const toggle = document.getElementById('themeToggle');
+    const themeModeLabel = document.getElementById('themeModeLabel');
+    if (toggle) toggle.checked = targetTheme === 'dark';
+    if (themeModeLabel) {
+        themeModeLabel.innerHTML = targetTheme === 'dark'
+            ? '<span class="theme-icon moon">🌙</span>Dark'
+            : '<span class="theme-icon sun">☀</span>Light';
+    }
+    try {
+        localStorage.setItem(THEME_STORAGE_KEY, targetTheme);
+    } catch (err) {
+        logDebug('localStorage theme', err);
+    }
+}
+
+function initializeThemeToggle() {
+    let savedTheme = 'dark';
+    try {
+        savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
+    } catch (err) {
+        logDebug('localStorage theme read', err);
+    }
+    applyTheme(savedTheme);
+    const themeToggle = document.getElementById('themeToggle');
+    if (themeToggle) {
+        themeToggle.addEventListener('change', () => {
+            applyTheme(themeToggle.checked ? 'dark' : 'light');
+        });
+    }
+}
+
+function loadAppMode() {
+    try {
+        const stored = window.localStorage.getItem(APP_MODE_STORAGE_KEY);
+        appMode = stored === 'basic' ? 'basic' : 'advanced';
+    } catch (err) {
+        logDebug('localStorage app mode', err);
+        appMode = 'advanced';
+    }
+}
+
+function applyAppModeToBody() {
+    document.body.setAttribute('data-app-mode', appMode);
+    const basicBtn = document.getElementById('appModeBasic');
+    const advBtn = document.getElementById('appModeAdvanced');
+    if (basicBtn) {
+        basicBtn.classList.toggle('active', appMode === 'basic');
+        basicBtn.setAttribute('aria-pressed', appMode === 'basic' ? 'true' : 'false');
+    }
+    if (advBtn) {
+        advBtn.classList.toggle('active', appMode === 'advanced');
+        advBtn.setAttribute('aria-pressed', appMode === 'advanced' ? 'true' : 'false');
+    }
+    applyConsumerGroupFieldState();
+}
+
+function applyConsumerGroupFieldState() {
+    const groupInput = document.getElementById('consumerGroupInput');
+    if (!groupInput) return;
+    const basic = appMode === 'basic';
+    groupInput.disabled = basic || consumeStarted;
+    if (basic) {
+        groupInput.title = 'Switch to Advanced mode to edit the consumer group.';
+    } else if (consumeStarted) {
+        groupInput.title = '';
+    } else {
+        groupInput.title = '';
+    }
+}
+
+function isMethodVisibleInAppMode(m) {
+    if (appMode === 'advanced') return true;
+    return m.id === 'producer' || m.id === 'consumer' || m.id === 'consumerLag';
+}
+
+function rebuildMethodTabs() {
+    const methodTabContainer = document.getElementById('tabs');
+    if (!methodTabContainer) return;
+    const visible = Object.values(method).filter(isMethodVisibleInAppMode);
+    if (!visible.some((vm) => vm.id === activeMethod)) {
+        activeMethod = 'producer';
+    }
+    methodTabContainer.innerHTML = '';
+    visible.forEach((m) => buildMethodTab(methodTabContainer, m));
+    const activeTab = document.getElementById(activeMethod);
+    if (activeTab) {
+        onMethodTabClick(activeTab);
+    } else if (visible.length) {
+        onMethodTabClick(document.getElementById(visible[0].id));
+    }
+}
+
+function setAppMode(next) {
+    const nextMode = next === 'basic' ? 'basic' : 'advanced';
+    if (nextMode === appMode) {
+        applyAppModeToBody();
+        return;
+    }
+    appMode = nextMode;
+    try {
+        window.localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
+    } catch (err) {
+        logDebug('localStorage app mode write', err);
+    }
+    if (appMode === 'basic' && !['producer', 'consumer', 'consumerLag'].includes(activeMethod)) {
+        activeMethod = 'producer';
+    }
+    applyAppModeToBody();
+    rebuildMethodTabs();
+}
+
+function initializeAppModeToggle() {
+    const basicBtn = document.getElementById('appModeBasic');
+    const advBtn = document.getElementById('appModeAdvanced');
+    if (basicBtn) {
+        basicBtn.addEventListener('click', () => setAppMode('basic'));
+    }
+    if (advBtn) {
+        advBtn.addEventListener('click', () => setAppMode('advanced'));
+    }
+}
+
+function hideConsumerSeekingStatus() {
+    const el = document.getElementById('consumerFetchStatus');
+    if (el) {
+        el.classList.remove('is-visible');
+        el.innerHTML = '';
+    }
+    if (consumerSeekHintTimerId) {
+        clearTimeout(consumerSeekHintTimerId);
+        consumerSeekHintTimerId = null;
+    }
+}
+
+function showConsumerSeekingStatus(opts) {
+    const el = document.getElementById('consumerFetchStatus');
+    if (!el) return;
+    const partLabel = opts.partition != null && opts.partition !== ''
+        ? `partition ${opts.partition}`
+        : 'all partitions';
+    const off = opts.offset != null && String(opts.offset) !== '' ? String(opts.offset) : '(unspecified)';
+    el.innerHTML = `<span class="consumer-fetch-spinner" aria-hidden="true"></span><span class="consumer-fetch-text">Seeking to offset ${off} on ${partLabel} — waiting for messages…</span>`;
+    el.classList.add('is-visible');
+    if (consumerSeekHintTimerId) {
+        clearTimeout(consumerSeekHintTimerId);
+        consumerSeekHintTimerId = null;
+    }
+    consumerSeekHintTimerId = setTimeout(() => {
+        const text = el.querySelector('.consumer-fetch-text');
+        if (text && el.classList.contains('is-visible')) {
+            text.textContent = 'Still waiting — the offset may be past the end of the log, or there may be no messages yet.';
+        }
+        consumerSeekHintTimerId = null;
+    }, 10000);
+}
+
+function renderConsumerTabBlink(show) {
+    const statusNode = document.querySelector('#consumer .tab-status');
+    if (!statusNode) return;
+    statusNode.textContent = show ? '●' : '';
+}
+
+function isTopicsBrowserChromeHidden() {
+    return activeMethod === 'topicsBrowser'
+        || activeMethod === 'consumerLag'
+        || activeMethod === 'clusterInfo';
+}
+
+function applyRibbonAndOptionsChrome(hideTopicsChrome) {
+    const ribbon = document.getElementById('summaryCards');
+    if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
+    const optionsSection = document.getElementById('topics');
+    if (optionsSection) optionsSection.style.display = hideTopicsChrome ? 'none' : '';
+}
+
+function applyProducerConsumerOptionSections() {
+    const producerOptionsSection = document.getElementById('optionsProducerSection');
+    const consumerOptionsSection = document.getElementById('optionsConsumerSection');
+    if (producerOptionsSection) {
+        producerOptionsSection.style.display = activeMethod === 'producer' ? '' : 'none';
+    }
+    if (consumerOptionsSection) {
+        consumerOptionsSection.style.display = activeMethod === 'consumer' ? '' : 'none';
+    }
+}
+
+function applySummaryEnvGroupCards(hideTopicsChrome) {
+    const envCard = document.getElementById('summaryCardActiveEnv');
+    const groupCard = document.getElementById('summaryCardConsumerGroup');
+    if (hideTopicsChrome) {
+        if (envCard) envCard.style.display = '';
+        if (groupCard) groupCard.style.display = '';
+        return;
+    }
+    const hideActiveEnv = activeMethod === 'producer' || activeMethod === 'consumer';
+    if (envCard) envCard.style.display = hideActiveEnv ? 'none' : '';
+    if (groupCard) groupCard.style.display = activeMethod === 'producer' ? 'none' : '';
+}
+
+function applyActiveMethodLayout() {
+    const hideTopicsChrome = isTopicsBrowserChromeHidden();
+    applyRibbonAndOptionsChrome(hideTopicsChrome);
+    applyProducerConsumerOptionSections();
+    applySummaryEnvGroupCards(hideTopicsChrome);
+}
+
+function updateSummaryCards() {
+    const brokerCount = document.getElementById('brokerCount');
+    const topicCount = document.getElementById('topicCount');
+    const activeEnvName = document.getElementById('activeEnvName');
+    const activeTopicName = document.getElementById('activeTopicName');
+    const activeGroupName = document.getElementById('activeGroupName');
+
+    if (envConfig && activeEnv && envConfig[activeEnv]) {
+        const env = envConfig[activeEnv];
+        const brokers = Array.isArray(env.brokers) ? env.brokers : [];
+        const topics = Array.isArray(env.topicList) ? env.topicList : [];
+        brokerCount.textContent = String(brokers.length);
+        topicCount.textContent = String(topics.length);
+        activeEnvName.textContent = env.label || activeEnv;
+    }
+
+    let selectedTopicLabel = '';
+    if (activeMethod === 'consumer') {
+        selectedTopicLabel = consumerTopic;
+    } else if (activeMethod === 'consumerLag') {
+        selectedTopicLabel = lagTopic;
+    } else if (activeMethod !== 'clusterInfo') {
+        selectedTopicLabel = producerTopic;
+    }
+    activeTopicName.textContent = selectedTopicLabel || '-';
+    if (activeGroupName) activeGroupName.textContent = consumerGroup || '-';
+}
 
 async function loadConfig() {
     const homeDir = os.homedir();
     const kssDir = path.join(homeDir, '.kss');
     const configPath = path.join(kssDir, '.config');
 
-    // Check if .kss directory exists, if not create it
     if (!fs.existsSync(kssDir)) {
         fs.mkdirSync(kssDir);
     }
 
-    // Check if .config file exists
     if (fs.existsSync(configPath)) {
         try {
             const config = fs.readFileSync(configPath, 'utf8');
@@ -57,33 +731,34 @@ async function loadConfig() {
             if (!valid) {
                 throw new Error('Invalid configuration format');
             }
-
+            Object.keys(envConfig).forEach((envId) => {
+                const e = envConfig[envId];
+                e.connection = normalizeConnection(e.connection);
+            });
             return envConfig;
         } catch (error) {
             console.error('Error reading or parsing the config file:', error);
             hideLoading();
             closeAlert();
-            // open setup window
-            ipcRenderer.send('open-setup-window');
-            await new Promise(resolve => {
+            ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
+            await new Promise((resolve) => {
                 ipcRenderer.once('setup-window-closed', resolve);
             });
-            loadConfig();
+            return loadConfig();
         }
     } else {
         hideLoading();
         closeAlert();
-        //open setup window
-        ipcRenderer.send('open-setup-window');
-        await new Promise(resolve => {
+        ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
+        await new Promise((resolve) => {
             ipcRenderer.once('setup-window-closed', resolve);
         });
-        loadConfig();
+        return loadConfig();
     }
 }
 
 function initializeEditor() {
-    let editorContainer = document.getElementById('payload');
+    const editorContainer = document.getElementById('payload');
     editor = CodeMirror(editorContainer, {
         lineSeparator: null,
         indentUnit: 2,
@@ -97,13 +772,14 @@ function initializeEditor() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
-        theme: 'dracula',
-        placeholder: 'Enter a JSON payload...',
-    })
+        mode: { name: 'javascript', json: true },
+        theme: 'default',
+        placeholder: 'Enter the payload...',
+    });
 }
 
 function initializeConsumer() {
-    let consumerContainer = document.getElementById('consumedMessages');
+    const consumerContainer = document.getElementById('consumedMessages');
     consumer = CodeMirror(consumerContainer, {
         lineSeparator: null,
         indentUnit: 2,
@@ -118,241 +794,2103 @@ function initializeConsumer() {
         undoDepth: 200,
         historyEventDelay: 1250,
         autofocus: true,
-        theme: 'dracula',
+        mode: { name: 'javascript', json: true },
+        theme: 'default',
         placeholder: 'Consumed messages will display here...',
-    })
+    });
+}
+
+function validatePayload(format, text) {
+    if (format === 'text') return true;
+    const raw = text == null ? '' : String(text);
+    if (format === 'json') {
+        try {
+            JSON.parse(raw);
+            return true;
+        } catch (err) {
+            logDebug('validatePayload json', err);
+            return false;
+        }
+    }
+    if (format === 'xml') {
+        const trimmed = raw.trim();
+        if (!trimmed) return false;
+        const doc = new DOMParser().parseFromString(raw, 'application/xml');
+        return !doc.querySelector('parsererror');
+    }
+    return false;
+}
+
+function formatPayloadXml(text) {
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.querySelector('parsererror')) throw new Error('Invalid XML');
+
+    function escAttr(v) {
+        return String(v)
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;');
+    }
+
+    function walk(node, depth) {
+        const pad = '  '.repeat(depth);
+        if (node.nodeType === 3) {
+            const t = node.textContent;
+            if (!t || !t.trim()) return '';
+            return `${pad}${t.trim()}\n`;
+        }
+        if (node.nodeType !== 1) return '';
+        let out = '';
+        let attrs = '';
+        for (let i = 0; i < node.attributes.length; i += 1) {
+            const a = node.attributes[i];
+            attrs += ` ${a.name}="${escAttr(a.value)}"`;
+        }
+        const childEls = [...node.childNodes].filter((n) => n.nodeType === 1);
+        const textNodes = [...node.childNodes].filter((n) => n.nodeType === 3);
+        const textJoined = textNodes.map((n) => n.textContent.trim()).filter(Boolean).join(' ');
+        if (!childEls.length && !textJoined) {
+            return `${pad}<${node.nodeName}${attrs}/>\n`;
+        }
+        out += `${pad}<${node.nodeName}${attrs}>\n`;
+        if (textJoined) out += `${'  '.repeat(depth + 1)}${textJoined}\n`;
+        for (const ch of childEls) out += walk(ch, depth + 1);
+        out += `${pad}</${node.nodeName}>\n`;
+        return out;
+    }
+
+    return walk(doc.documentElement, 0).trimEnd();
+}
+
+function formatPayload(format, text) {
+    if (format === 'json') {
+        return JSON.stringify(JSON.parse(text), null, 2);
+    }
+    if (format === 'xml') {
+        return formatPayloadXml(text);
+    }
+    return text;
+}
+
+function applyEditorMode(cmEditor, formatId) {
+    const spec = PAYLOAD_FORMATS[formatId] || PAYLOAD_FORMATS[DEFAULT_FORMAT];
+    if (!cmEditor) return;
+    cmEditor.setOption('mode', spec.cmMode);
+}
+
+function revalidateProducerPayload() {
+    const formatButton = document.getElementById('formatButton');
+    if (!editor) return;
+    const text = editor.getValue();
+    validPayload = validatePayload(producerFormat, text);
+    if (formatButton) {
+        formatButton.disabled = !validPayload || producerFormat === 'text';
+    }
+    reloadProduceButton();
+}
+
+function applyProducerFormat(format, { skipStorage } = {}) {
+    const id = PAYLOAD_FORMATS[format] ? format : DEFAULT_FORMAT;
+    producerFormat = id;
+    const sel = document.getElementById('producerFormatSelect');
+    if (sel) sel.value = producerFormat;
+    if (editor) applyEditorMode(editor, producerFormat);
+    revalidateProducerPayload();
+    if (!skipStorage) {
+        try {
+            window.localStorage.setItem(PRODUCER_FORMAT_STORAGE_KEY, producerFormat);
+        } catch (err) {
+            logDebug('localStorage producer format', err);
+        }
+    }
+}
+
+function applyConsumerFormat(format, { skipStorage } = {}) {
+    const id = PAYLOAD_FORMATS[format] ? format : DEFAULT_FORMAT;
+    consumerFormat = id;
+    const sel = document.getElementById('consumerFormatSelect');
+    if (sel) sel.value = consumerFormat;
+    if (consumer) applyEditorMode(consumer, consumerFormat);
+    applyFilter();
+    if (!skipStorage) {
+        try {
+            window.localStorage.setItem(CONSUMER_FORMAT_STORAGE_KEY, consumerFormat);
+        } catch (err) {
+            logDebug('localStorage consumer format', err);
+        }
+    }
+}
+
+function loadConsumerTableViewPreference() {
+    const prefs = loadPreferences();
+    consumerTableView = !!prefs.consumerTableView;
+    const toggle = document.getElementById('consumerTableViewToggle');
+    if (toggle) toggle.checked = consumerTableView;
+}
+
+function persistConsumerTableViewPreference(on) {
+    const prefs = loadPreferences();
+    prefs.consumerTableView = !!on;
+    savePreferences(prefs);
+}
+
+function decodeHeaderValue(v) {
+    if (v == null) return '';
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(v)) return v.toString('utf8');
+    if (v instanceof Uint8Array) return Buffer.from(v).toString('utf8');
+    if (typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+        return Buffer.from(v.data).toString('utf8');
+    }
+    return String(v);
+}
+
+function normalizeHeaders(headers) {
+    const out = {};
+    if (!headers || typeof headers !== 'object') return out;
+    for (const [k, v] of Object.entries(headers)) {
+        out[k] = decodeHeaderValue(v);
+    }
+    return out;
+}
+
+function collectHeaderKeysFromMessages(messages) {
+    const set = new Set();
+    for (const m of messages) {
+        const h = normalizeHeaders(m.headers || {});
+        Object.keys(h).forEach((k) => set.add(k));
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+function formatTimestampDisplay(ts) {
+    if (ts == null || ts === '') return '—';
+    const n = Number(ts);
+    if (Number.isFinite(n)) {
+        const d = new Date(n);
+        if (!Number.isNaN(d.getTime())) {
+            const pad = (x) => String(x).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+                + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        }
+    }
+    return String(ts);
+}
+
+/**
+ * Filter matches message key and value only (not record headers).
+ */
+function getFilteredConsumedMessages() {
+    const filterInput = document.getElementById('filterInput');
+    const regexToggle = document.getElementById('filterRegex');
+    const term = (filterInput && filterInput.value) || '';
+    const useRegex = regexToggle && regexToggle.checked;
+
+    let filtered = consumedMessages;
+    if (term.trim().length > 0) {
+        if (useRegex) {
+            try {
+                const re = new RegExp(term, 'i');
+                filtered = consumedMessages.filter((m) => re.test(m.value) || re.test(String(m.key || '')));
+            } catch (err) {
+                logDebug('consumer filter regex', err);
+                filtered = consumedMessages;
+            }
+        } else {
+            const lower = term.toLowerCase();
+            filtered = consumedMessages.filter((m) =>
+                m.value.toLowerCase().includes(lower) ||
+                String(m.key || '').toLowerCase().includes(lower));
+        }
+    }
+    return filtered;
+}
+
+function formatPayloadForViewer(raw, formatId) {
+    const id = PAYLOAD_FORMATS[formatId] ? formatId : DEFAULT_FORMAT;
+    const text = raw != null ? String(raw) : '';
+    if (id === 'text') return text;
+    try {
+        return formatPayload(id, text);
+    } catch (err) {
+        logDebug('formatPayloadForViewer', err);
+        return text;
+    }
+}
+
+const PAYLOAD_VIEWER_STORAGE_KEY = 'kssPayloadViewer';
+
+function openConsumerMessagePayloadWindow(msg) {
+    if (!msg) return;
+    const raw = msg.value != null ? String(msg.value) : '';
+    const theme = document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    const fmtId = PAYLOAD_FORMATS[consumerFormat] ? consumerFormat : DEFAULT_FORMAT;
+    const display = formatPayloadForViewer(raw, fmtId);
+    try {
+        sessionStorage.setItem(PAYLOAD_VIEWER_STORAGE_KEY, JSON.stringify({
+            text: display,
+            theme,
+            formatId: fmtId,
+        }));
+    } catch (err) {
+        logDebug('sessionStorage set viewer payload', err);
+        showAlert('View payload', 'Could not store payload for the viewer (too large or storage unavailable).');
+        return;
+    }
+    let url;
+    try {
+        url = new URL('payload-viewer.html', window.location.href).href;
+    } catch (err) {
+        logDebug('payload-viewer URL', err);
+        url = 'payload-viewer.html';
+    }
+    const w = window.open(url, '_blank', 'width=920,height=720,scrollbars=yes');
+    if (!w) {
+        try {
+            sessionStorage.removeItem(PAYLOAD_VIEWER_STORAGE_KEY);
+        } catch (err) {
+            logDebug('sessionStorage remove viewer key', err);
+        }
+        showAlert('View payload', 'Could not open a new window (popup blocker or OS restriction).');
+    }
+}
+
+function wireConsumerTablePayloadViewer() {
+    const wrap = document.getElementById('consumedMessagesTableWrap');
+    if (!wrap || consumerTablePayloadClickBound) return;
+    consumerTablePayloadClickBound = true;
+    wrap.addEventListener('click', (e) => {
+        const btn = e.target.closest('.consumer-view-payload-btn');
+        const valueCell = e.target.closest('.consumer-msg-value-cell--openable');
+        if (!btn && !valueCell) return;
+        const tr = (btn || valueCell).closest('tr');
+        if (!tr || tr.querySelector('.consumer-msg-empty')) return;
+        const idx = parseInt(tr.getAttribute('data-msg-index') || '', 10);
+        if (!Number.isFinite(idx)) return;
+        const msg = lastConsumerTableFilteredSnapshot[idx];
+        if (!msg) return;
+        const val = msg.value != null ? String(msg.value) : '';
+        if (!val) return;
+        if (btn) e.preventDefault();
+        openConsumerMessagePayloadWindow(msg);
+    });
+
+    wrap.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const valueCell = e.target.closest('.consumer-msg-value-cell--openable');
+        if (!valueCell) return;
+        e.preventDefault();
+        const tr = valueCell.closest('tr');
+        if (!tr) return;
+        const idx = parseInt(tr.getAttribute('data-msg-index') || '', 10);
+        if (!Number.isFinite(idx)) return;
+        const msg = lastConsumerTableFilteredSnapshot[idx];
+        if (!msg) return;
+        const val = msg.value != null ? String(msg.value) : '';
+        if (!val) return;
+        openConsumerMessagePayloadWindow(msg);
+    });
+}
+
+function applyConsumerSurfaceVisibility() {
+    const cmHost = document.getElementById('consumedMessages');
+    const tableWrap = document.getElementById('consumedMessagesTableWrap');
+    if (!cmHost || !tableWrap) return;
+    if (consumerTableView) {
+        cmHost.style.display = 'none';
+        tableWrap.hidden = false;
+    } else {
+        cmHost.style.display = '';
+        tableWrap.hidden = true;
+        if (consumer) {
+            try {
+                consumer.refresh();
+            } catch (err) {
+                logDebug('consumer.refresh', err);
+            }
+        }
+    }
+}
+
+function renderConsumerTable(filtered) {
+    const thead = document.getElementById('consumedMessagesTableHead');
+    const tbody = document.getElementById('consumedMessagesTableBody');
+    if (!thead || !tbody) return;
+
+    lastConsumerTableFilteredSnapshot = filtered.slice();
+
+    const headerKeys = collectHeaderKeysFromMessages(filtered);
+    const fixedTh = ['Par', 'Offset', 'Timestamp', 'Key', 'Value'].map((label) => `<th>${escapeHtml(label)}</th>`).join('');
+    const dynTh = headerKeys.map((k) => `<th>${escapeHtml(k)}</th>`).join('');
+    thead.innerHTML = `<tr>${fixedTh}${dynTh}</tr>`;
+
+    if (filtered.length === 0) {
+        const colSpan = 5 + headerKeys.length;
+        tbody.innerHTML = `<tr><td class="consumer-msg-empty" colspan="${colSpan}">No messages yet.</td></tr>`;
+        return;
+    }
+
+    const maxCellOther = 200;
+    const valuePreviewMax = 120;
+    const trunc = (s, maxLen) => {
+        const t = s == null ? '' : String(s);
+        if (t.length <= maxLen) return { html: escapeHtml(t), title: '', truncated: false };
+        return {
+            html: `${escapeHtml(t.slice(0, maxLen))}…`,
+            title: escapeHtml(t),
+            truncated: true,
+        };
+    };
+
+    tbody.innerHTML = filtered.map((m, rowIdx) => {
+        const h = normalizeHeaders(m.headers || {});
+        const ts = formatTimestampDisplay(m.timestamp);
+        const keyDisp = trunc(m.key != null && m.key !== '' ? String(m.key) : '—', maxCellOther);
+        const valStr = m.value != null ? String(m.value) : '';
+        const valDisp = trunc(valStr, valuePreviewMax);
+        const keyTitle = keyDisp.title ? ` title="${keyDisp.title}"` : '';
+        const valueHasContent = valStr.length > 0;
+        let valueTitleAttr = '';
+        if (valDisp.title) {
+            valueTitleAttr = ` title="${valDisp.title}"`;
+        } else if (valueHasContent) {
+            valueTitleAttr = ' title="Open full payload in new window (click or Enter)"';
+        }
+        const valueCellAttrs = valueHasContent
+            ? ` class="consumer-msg-value-cell consumer-msg-value-cell--openable" tabindex="0" role="button" aria-label="Open full payload in new window"${valueTitleAttr}`
+            : ' class="consumer-msg-value-cell"';
+        const viewBtn = valueHasContent && valDisp.truncated
+            ? '<button type="button" class="consumer-view-payload-btn btn-secondary" title="Open full payload in new window">View</button>'
+            : '';
+        const valueInner = `<span class="consumer-msg-value-preview">${valDisp.html || '—'}</span>${viewBtn}`;
+        const fixedCells = `
+            <td>${escapeHtml(String(m.partition))}</td>
+            <td>${escapeHtml(String(m.offset))}</td>
+            <td class="consumer-msg-ts-cell">${escapeHtml(ts)}</td>
+            <td${keyTitle}>${keyDisp.html}</td>
+            <td${valueCellAttrs}>${valueInner}</td>`;
+        const dynCells = headerKeys.map((hk) => {
+            const raw = h[hk] != null && h[hk] !== '' ? String(h[hk]) : '—';
+            const d = trunc(raw === '—' ? '—' : raw, maxCellOther);
+            const tit = d.title ? ` title="${d.title}"` : '';
+            return `<td${tit}>${d.html}</td>`;
+        }).join('');
+        return `<tr data-msg-index="${rowIdx}">${fixedCells}${dynCells}</tr>`;
+    }).join('');
+
+    const wrap = document.getElementById('consumedMessagesTableWrap');
+    if (wrap) {
+        const sc = wrap.querySelector('.consumer-messages-table-scroll');
+        if (sc) sc.scrollTop = sc.scrollHeight;
+    }
+}
+
+function formatConsumedEntry(msg) {
+    let body = msg.value;
+    if (consumerFormat === 'json') {
+        try {
+            body = JSON.stringify(JSON.parse(msg.value), null, 2);
+        } catch (err) {
+            logDebug('format consumed json', err);
+        }
+    }
+    const metaLine = `partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
+        (msg.key ? ` key=${msg.key}` : '');
+    let meta;
+    if (consumerFormat === 'xml') {
+        meta = `<!-- ${metaLine} -->`;
+    } else if (consumerFormat === 'text') {
+        meta = `# ${metaLine}`;
+    } else {
+        meta = `// ${metaLine}`;
+    }
+    return `${meta}\n${body}`;
+}
+
+function applyFilter() {
+    const messageCount = document.getElementById('messageCount');
+    const filtered = getFilteredConsumedMessages();
+
+    if (messageCount) {
+        messageCount.textContent = `${filtered.length} / ${consumedMessages.length}`;
+    }
+
+    applyConsumerSurfaceVisibility();
+
+    if (consumerTableView) {
+        renderConsumerTable(filtered);
+        return;
+    }
+
+    if (!consumer) return;
+
+    const text = filtered.map(formatConsumedEntry).join(LINE_SEPARATOR) +
+        (filtered.length > 0 ? LINE_SEPARATOR : '');
+    consumer.setValue(text);
+    const lastLine = consumer.getScrollInfo().height;
+    consumer.scrollTo(0, lastLine);
+}
+
+function buildExportRows(messages) {
+    return messages.map((m) => ({
+        topic: m.topic,
+        partition: m.partition,
+        offset: m.offset,
+        timestamp: m.timestamp,
+        key: m.key,
+        value: m.value,
+        headers: normalizeHeaders(m.headers || {}),
+    }));
+}
+
+function collectHeaderKeysFromExportRows(rows) {
+    const set = new Set();
+    for (const r of rows) {
+        if (r.headers && typeof r.headers === 'object') {
+            Object.keys(r.headers).forEach((k) => set.add(k));
+        }
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+function escapeCsvCell(s) {
+    const str = s == null ? '' : String(s);
+    if (/[",\n\r]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+}
+
+function serializeExportCsv(rows) {
+    const headerKeys = collectHeaderKeysFromExportRows(rows);
+    const cols = ['partition', 'offset', 'timestamp', 'key', 'value', ...headerKeys];
+    const lines = [cols.join(',')];
+    for (const r of rows) {
+        const cells = [
+            r.partition,
+            r.offset,
+            r.timestamp,
+            r.key ?? '',
+            r.value ?? '',
+            ...headerKeys.map((hk) => (r.headers && r.headers[hk] != null) ? r.headers[hk] : ''),
+        ].map(escapeCsvCell);
+        lines.push(cells.join(','));
+    }
+    return `${lines.join('\n')}\n`;
+}
+
+function showExportFormatDialog() {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('prompt-modal');
+        const titleEl = document.getElementById('prompt-title');
+        const messageEl = document.getElementById('prompt-message');
+        const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
+        const formatSelect = document.getElementById('prompt-format-select');
+        const confirmBtn = document.getElementById('prompt-confirm');
+        const cancelBtn = document.getElementById('prompt-cancel');
+        const closeBtn = document.getElementById('prompt-close');
+
+        if (!modal || !formatWrap || !formatSelect) {
+            resolve(null);
+            return;
+        }
+
+        titleEl.textContent = 'Export consumed messages';
+        messageEl.textContent = 'Choose a format, then pick where to save the file.';
+        input.style.display = 'none';
+        formatWrap.style.display = 'block';
+        formatSelect.value = 'json';
+        modal.style.display = 'block';
+        setTimeout(() => formatSelect.focus(), 50);
+
+        const cleanup = (value) => {
+            modal.style.display = 'none';
+            input.style.display = '';
+            formatWrap.style.display = 'none';
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+            closeBtn.removeEventListener('click', onCancel);
+            formatSelect.removeEventListener('keydown', onKey);
+            resolve(value);
+        };
+        const onConfirm = () => cleanup(formatSelect.value || null);
+        const onCancel = () => cleanup(null);
+        const onKey = (e) => {
+            if (e.key === 'Enter') onConfirm();
+            if (e.key === 'Escape') onCancel();
+        };
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+        closeBtn.addEventListener('click', onCancel);
+        formatSelect.addEventListener('keydown', onKey);
+    });
+}
+
+async function handleExportConsumed() {
+    const filtered = getFilteredConsumedMessages();
+    if (!filtered.length) {
+        showAlert('Export', 'Nothing to export.');
+        return;
+    }
+    const format = await showExportFormatDialog();
+    if (!format || !['json', 'jsonl', 'csv'].includes(format)) return;
+
+    let defaultPath = 'consumed-messages.csv';
+    if (format === 'json') {
+        defaultPath = 'consumed-messages.json';
+    } else if (format === 'jsonl') {
+        defaultPath = 'consumed-messages.jsonl';
+    }
+    const result = await ipcRenderer.invoke('save-consumed-export', {
+        defaultPath,
+        filters: [
+            { name: 'JSON', extensions: ['json'] },
+            { name: 'JSON Lines', extensions: ['jsonl', 'ndjson'] },
+            { name: 'CSV', extensions: ['csv'] },
+        ],
+    });
+    if (!result || result.canceled || !result.filePath) return;
+
+    const rows = buildExportRows(filtered);
+    let body;
+    if (format === 'json') {
+        body = JSON.stringify(rows, null, 2);
+    } else if (format === 'jsonl') {
+        body = rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : '');
+    } else {
+        body = serializeExportCsv(rows);
+    }
+    try {
+        fs.writeFileSync(result.filePath, body, 'utf8');
+        showAlert('Export', `Saved ${filtered.length} message(s).`);
+    } catch (err) {
+        showAlert('Export failed', err.message || String(err));
+    }
+}
+
+function pushConsumedMessage(msg) {
+    hideConsumerSeekingStatus();
+    consumedMessages.push(msg);
+    applyFilter();
+}
+
+function clearConsumedMessages() {
+    consumedMessages = [];
+    applyFilter();
+}
+
+function refreshTemplateSelect() {
+    const select = document.getElementById('templateSelect');
+    if (!select) return;
+    const items = templatesApi.listTemplates();
+    select.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = '— select template —';
+    select.appendChild(placeholder);
+    items.forEach((t) => {
+        const opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.name;
+        select.appendChild(opt);
+    });
+    if (selectedTemplateId && items.find((t) => t.id === selectedTemplateId)) {
+        select.value = selectedTemplateId;
+    } else {
+        selectedTemplateId = '';
+        select.value = '';
+    }
+    refreshTemplateButtons();
+}
+
+function refreshTemplateButtons() {
+    const updateBtn = document.getElementById('updateTemplateButton');
+    const deleteBtn = document.getElementById('deleteTemplateButton');
+    if (updateBtn) updateBtn.disabled = !selectedTemplateId;
+    if (deleteBtn) deleteBtn.disabled = !selectedTemplateId;
+}
+
+function populateTokenInsert() {
+    const select = document.getElementById('tokenInsertSelect');
+    if (!select) return;
+    select.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Insert token…';
+    select.appendChild(placeholder);
+    const byGroup = new Map();
+    for (const row of TOKEN_INSERT_OPTIONS) {
+        const g = row.group || 'Other';
+        if (!byGroup.has(g)) byGroup.set(g, []);
+        byGroup.get(g).push(row);
+    }
+    for (const [groupName, rows] of byGroup) {
+        const og = document.createElement('optgroup');
+        og.label = groupName;
+        for (const td of rows) {
+            const opt = document.createElement('option');
+            opt.value = td.token;
+            opt.textContent = `${td.token}  —  ${td.label}`;
+            og.appendChild(opt);
+        }
+        select.appendChild(og);
+    }
+    select.onchange = () => {
+        const token = select.value;
+        if (!token || !editor) return;
+        editor.replaceSelection(token);
+        select.value = '';
+        editor.focus();
+    };
+}
+
+function showPrompt(title, message, defaultValue = '') {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('prompt-modal');
+        const titleEl = document.getElementById('prompt-title');
+        const messageEl = document.getElementById('prompt-message');
+        const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
+        const confirmBtn = document.getElementById('prompt-confirm');
+        const cancelBtn = document.getElementById('prompt-cancel');
+        const closeBtn = document.getElementById('prompt-close');
+        if (formatWrap) formatWrap.style.display = 'none';
+        input.style.display = '';
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+        input.value = defaultValue;
+        modal.style.display = 'block';
+        setTimeout(() => input.focus(), 50);
+
+        const cleanup = (value) => {
+            modal.style.display = 'none';
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+            closeBtn.removeEventListener('click', onCancel);
+            input.removeEventListener('keydown', onKey);
+            resolve(value);
+        };
+        const onConfirm = () => cleanup(input.value);
+        const onCancel = () => cleanup(null);
+        const onKey = (e) => {
+            if (e.key === 'Enter') onConfirm();
+            if (e.key === 'Escape') onCancel();
+        };
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+        closeBtn.addEventListener('click', onCancel);
+        input.addEventListener('keydown', onKey);
+    });
+}
+
+function showConfirm(title, message) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('prompt-modal');
+        const titleEl = document.getElementById('prompt-title');
+        const messageEl = document.getElementById('prompt-message');
+        const input = document.getElementById('prompt-input');
+        const formatWrap = document.getElementById('prompt-format-wrap');
+        const confirmBtn = document.getElementById('prompt-confirm');
+        const cancelBtn = document.getElementById('prompt-cancel');
+        const closeBtn = document.getElementById('prompt-close');
+        if (formatWrap) formatWrap.style.display = 'none';
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+        input.value = '';
+        input.style.display = 'none';
+        modal.style.display = 'block';
+
+        const cleanup = (value) => {
+            modal.style.display = 'none';
+            input.style.display = '';
+            confirmBtn.removeEventListener('click', onConfirm);
+            cancelBtn.removeEventListener('click', onCancel);
+            closeBtn.removeEventListener('click', onCancel);
+            resolve(value);
+        };
+        const onConfirm = () => cleanup(true);
+        const onCancel = () => cleanup(false);
+        confirmBtn.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+        closeBtn.addEventListener('click', onCancel);
+    });
+}
+
+function clearConsumerBlurIdleTimer() {
+    if (consumerBlurIdleTimerId) {
+        clearTimeout(consumerBlurIdleTimerId);
+        consumerBlurIdleTimerId = null;
+    }
+}
+
+function scheduleConsumerBlurIdleTimer() {
+    clearConsumerBlurIdleTimer();
+    if (!consumeStarted || consumerIdleModalActive) return;
+    consumerBlurIdleTimerId = setTimeout(() => {
+        consumerBlurIdleTimerId = null;
+        showConsumerStillThereModal();
+    }, getConsumerIdlePrefs().blurUnfocusedMs);
+}
+
+function onWindowBlurForConsumerIdle() {
+    if (!consumeStarted) return;
+    scheduleConsumerBlurIdleTimer();
+}
+
+function onWindowFocusForConsumerIdle() {
+    clearConsumerBlurIdleTimer();
+}
+
+function hideConsumerStillThereModal() {
+    const overlay = document.getElementById('consumer-idle-overlay');
+    if (overlay) overlay.style.display = 'none';
+    if (consumerIdleCountdownIntervalId) {
+        clearInterval(consumerIdleCountdownIntervalId);
+        consumerIdleCountdownIntervalId = null;
+    }
+    consumerIdleModalActive = false;
+}
+
+function resetConsumerIdleWatchdog() {
+    clearConsumerBlurIdleTimer();
+    hideConsumerStillThereModal();
+}
+
+function resetConsumeUIState() {
+    hideConsumerSeekingStatus();
+    if (window.refreshIntervalId) {
+        clearInterval(window.refreshIntervalId);
+        window.refreshIntervalId = null;
+    }
+    renderConsumerTabBlink(false);
+    setConsumeRunningUI(false);
+    consumeStarted = false;
+    applyConsumerGroupFieldState();
+}
+
+async function stopConsumingAndResetUI() {
+    resetConsumerIdleWatchdog();
+    try {
+        await stopConsuming();
+    } catch (err) {
+        logDebug('stopConsuming', err);
+    }
+    resetConsumeUIState();
+}
+
+function showConsumerStillThereModal() {
+    if (!consumeStarted || consumerIdleModalActive) return;
+    const overlay = document.getElementById('consumer-idle-overlay');
+    const cdEl = document.getElementById('consumer-idle-countdown');
+    const confirmBtn = document.getElementById('consumer-idle-confirm');
+    const stopBtn = document.getElementById('consumer-idle-stop');
+    if (!overlay || !cdEl || !confirmBtn || !stopBtn) return;
+
+    clearConsumerBlurIdleTimer();
+    consumerIdleModalActive = true;
+    overlay.style.display = 'flex';
+    setTimeout(() => confirmBtn.focus(), 50);
+
+    let remaining = getConsumerIdlePrefs().promptResponseSec;
+    const updateDisplay = () => {
+        const m = Math.floor(remaining / 60);
+        const s = remaining % 60;
+        cdEl.textContent = `Stopping in ${m}:${String(s).padStart(2, '0')} unless you keep consuming.`;
+    };
+    updateDisplay();
+
+    const clearCountdown = () => {
+        if (consumerIdleCountdownIntervalId) {
+            clearInterval(consumerIdleCountdownIntervalId);
+            consumerIdleCountdownIntervalId = null;
+        }
+    };
+
+    consumerIdleCountdownIntervalId = setInterval(() => {
+        remaining -= 1;
+        updateDisplay();
+        if (remaining <= 0) {
+            clearCountdown();
+            void stopConsumingAndResetUI();
+        }
+    }, 1000);
+
+    confirmBtn.onclick = () => {
+        clearCountdown();
+        hideConsumerStillThereModal();
+        if (consumeStarted && !document.hasFocus()) {
+            scheduleConsumerBlurIdleTimer();
+        }
+    };
+
+    stopBtn.onclick = () => {
+        clearCountdown();
+        void stopConsumingAndResetUI();
+    };
+}
+
+async function refreshPartitions(topicName) {
+    const select = document.getElementById('partitionSelect');
+    if (!select) return;
+    select.innerHTML = '';
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = 'All partitions';
+    select.appendChild(allOpt);
+    if (!topicName || !envConfig || !envConfig[activeEnv]) return;
+    try {
+        await withKafkaAuthRecovery(topicName || '', async (kafka) => {
+            const offsets = await getTopicOffsets(kafka, topicName);
+            offsets
+                .sort((a, b) => Number(a.partition) - Number(b.partition))
+                .forEach((o) => {
+                    const opt = document.createElement('option');
+                    opt.value = String(o.partition);
+                    opt.textContent = `Partition ${o.partition} (low=${o.low}, high=${o.high})`;
+                    select.appendChild(opt);
+                });
+        });
+    } catch (err) {
+        console.warn('Could not load partitions for topic', topicName, err);
+    }
+}
+
+async function loadTopicsBrowser(forceRefresh = false) {
+    const tbody = document.getElementById('topicsTableBody');
+    const empty = document.getElementById('topicsEmptyState');
+    const countEl = document.getElementById('topicsCount');
+    if (!tbody) return;
+    showLoading();
+    try {
+        if (forceRefresh || topicsCache.length === 0) {
+            await withKafkaAuthRecovery('', async (kafka) => {
+                topicsCache = await getTopicsAndPartitions(kafka);
+            });
+        }
+        renderTopicsTable();
+        if (countEl) countEl.textContent = `${topicsCache.length} topic${topicsCache.length === 1 ? '' : 's'}`;
+        if (empty) empty.style.display = topicsCache.length === 0 ? 'block' : 'none';
+    } catch (err) {
+        showAlert('Failed to load topics', err.message);
+    } finally {
+        hideLoading();
+    }
+}
+
+function renderTopicsTable() {
+    const tbody = document.getElementById('topicsTableBody');
+    const searchInput = document.getElementById('topicsSearchInput');
+    if (!tbody) return;
+    const term = (searchInput && searchInput.value || '').trim().toLowerCase();
+    const filtered = term
+        ? topicsCache.filter((t) => t.name.toLowerCase().includes(term))
+        : topicsCache;
+
+    tbody.innerHTML = '';
+    filtered.forEach((t) => {
+        const tr = document.createElement('tr');
+        const leaders = t.partitions
+            .map((p) => `${p.partitionId}→${p.leader}`)
+            .join(', ');
+        tr.innerHTML = `
+            <td class="topic-cell">${escapeHtml(t.name)}</td>
+            <td>${t.partitionCount}</td>
+            <td>${t.replicationFactor}</td>
+            <td class="leaders-cell" title="${escapeHtml(leaders)}">${escapeHtml(leaders)}</td>
+            <td>${t.totalMessages}</td>
+            <td class="actions-cell">
+                <button class="btn-secondary" data-action="produce">Producer</button>
+                <button class="btn-secondary" data-action="consume">Consumer</button>
+                <button class="btn-secondary" data-action="lag" title="Open Consumer lag for this topic">Lag</button>
+            </td>
+        `;
+        const produceBtn = tr.querySelector('[data-action="produce"]');
+        if (produceBtn) {
+            produceBtn.addEventListener('click', () => {
+                useTopic(t.name, 'producer');
+            });
+        }
+        const consumeBtn = tr.querySelector('[data-action="consume"]');
+        if (consumeBtn) {
+            consumeBtn.addEventListener('click', () => {
+                useTopic(t.name, 'consumer');
+            });
+        }
+        tr.querySelector('[data-action="lag"]').addEventListener('click', () => {
+            navigateToConsumerLag(t.name);
+        });
+        tbody.appendChild(tr);
+    });
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function clearLagOverviewUI(message) {
+    const body = document.getElementById('lagTableBody');
+    const empty = document.getElementById('lagEmptyState');
+    const status = document.getElementById('lagStatus');
+    lagOverviewData = null;
+    if (body) body.innerHTML = '';
+    if (empty) {
+        empty.textContent = message || 'Select a topic and click Load.';
+        empty.style.display = 'block';
+    }
+    if (status) status.textContent = '';
+    setLagResetControlsState();
+}
+
+function setLagResetControlsState() {
+    const busy = lagResetInFlight;
+    document.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.disabled = busy;
+    });
+    document.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
+        btn.disabled = busy;
+    });
+}
+
+async function confirmLagReset(topic, groupId) {
+    const confirmed = await showConfirm(
+        'Reset offsets to latest?',
+        `You are about to reset committed offsets for group "${groupId}" on topic "${topic}". This can immediately clear lag. Active consumers may commit different offsets again after this action. Continue?`
+    );
+    if (!confirmed) return null;
+
+    const reasonRaw = await showPrompt(
+        'Offset reset reason',
+        'Enter a reason for auditing this action.',
+        ''
+    );
+    if (reasonRaw === null) return null;
+    const reason = String(reasonRaw || '').trim();
+    if (!reason) {
+        showAlert('Offset reset', 'Reason is required.');
+        return null;
+    }
+    return reason;
+}
+
+async function confirmLagDelete(groupId) {
+    return showConfirm(
+        'Delete consumer group?',
+        `This will permanently remove consumer group "${groupId}" from the cluster (group metadata and committed offsets). Kafka only allows deletion when a group has no active members (state Empty or Dead). Stop any consumers using this group first. This cannot be undone. Continue?`
+    );
+}
+
+async function handleLagDelete(groupId) {
+    const topic = lagTopic;
+    if (!topic) {
+        showAlert('Delete consumer group', 'Select a topic first.');
+        return;
+    }
+    if (!isUnsafeConsumerGroupOpsAllowed()) {
+        showAlert(
+            'Not available',
+            'Deleting consumer groups is disabled for this environment. Set "allowedUnsafeOperations" to true in the config JSON (~/.kss/.config) or in Setup → Advanced → edit JSON.',
+        );
+        return;
+    }
+    if (!groupId) {
+        showAlert('Delete consumer group', 'No consumer group selected.');
+        return;
+    }
+    const confirmed = await confirmLagDelete(groupId);
+    if (!confirmed) return;
+
+    lagResetInFlight = true;
+    setLagResetControlsState();
+    showLoading();
+    try {
+        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+            deleteConsumerGroups(kafka, { groupIds: [groupId] }));
+        if (details.failureCount === 0) {
+            showAlert('Consumer group deleted', 'Deleted 1 group.');
+        } else {
+            const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
+            showAlert('Delete consumer group failed', firstErr);
+        }
+        await loadConsumerLagOverview();
+    } catch (err) {
+        showAlert('Delete consumer group failed', err.message || String(err));
+    } finally {
+        lagResetInFlight = false;
+        hideLoading();
+        setLagResetControlsState();
+    }
+}
+
+async function handleLagReset(groupId) {
+    const topic = lagTopic;
+    if (!topic) {
+        showAlert('Offset reset', 'Select a topic first.');
+        return;
+    }
+    if (!isUnsafeConsumerGroupOpsAllowed()) {
+        showAlert(
+            'Not available',
+            'Resetting offsets to latest is disabled for this environment. Set "allowedUnsafeOperations" to true in the config JSON (~/.kss/.config) or in Setup → Advanced → edit JSON.',
+        );
+        return;
+    }
+    if (!groupId) {
+        showAlert('Offset reset', 'No consumer group selected.');
+        return;
+    }
+    const reason = await confirmLagReset(topic, groupId);
+    if (reason === null) return;
+
+    const osUsername = (() => {
+        try {
+            return os.userInfo().username || process.env.USERNAME || process.env.USER || 'unknown';
+        } catch (err) {
+            logDebug('os.userInfo', err);
+            return process.env.USERNAME || process.env.USER || 'unknown';
+        }
+    })();
+
+    lagResetInFlight = true;
+    setLagResetControlsState();
+    showLoading();
+    try {
+        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
+            resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId }));
+        showAlert('Offset reset', `Reset offsets to latest for "${groupId}" on "${topic}".`);
+
+        try {
+            appendOffsetResetAudit({
+                scope: 'single',
+                topic,
+                groupIds: [groupId],
+                operatorReason: reason,
+                osUsername,
+                activeEnv,
+                outcome: 'success',
+                details,
+            });
+        } catch (auditErr) {
+            console.warn('Failed to append offset reset audit log:', auditErr);
+        }
+
+        await loadConsumerLagOverview();
+    } catch (err) {
+        showAlert('Offset reset failed', err.message || String(err));
+    } finally {
+        lagResetInFlight = false;
+        hideLoading();
+        setLagResetControlsState();
+    }
+}
+
+function populateLagTopicSelect() {
+    const sel = document.getElementById('lagTopicSelect');
+    if (!sel) return;
+    const prev = lagTopic;
+    sel.innerHTML = '';
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = 'Select a topic…';
+    sel.appendChild(ph);
+    activeTopicList.forEach((t) => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t;
+        sel.appendChild(opt);
+    });
+    if (prev && activeTopicList.includes(prev)) {
+        lagTopic = prev;
+    } else {
+        lagTopic = '';
+    }
+    sel.value = lagTopic;
+    sel.onchange = () => {
+        lagTopic = sel.value;
+    };
+}
+
+function lagCommittedAndLagCells(pr) {
+    const committedCell = pr.committedDisplay === null ? '—' : escapeHtml(pr.committedDisplay);
+    const lagCell = pr.lag === null ? '—' : escapeHtml(String(pr.lag));
+    return { committedCell, lagCell };
+}
+
+function lagClientsCells(clientsStr, clientsShort) {
+    const clientsTitle = escapeHtml(clientsStr);
+    const clientsBody = clientsShort ? escapeHtml(clientsShort) : '—';
+    return { clientsTitle, clientsBody };
+}
+
+function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
+    const tr = document.createElement('tr');
+    const { committedCell, lagCell } = lagCommittedAndLagCells(pr);
+    const { clientsTitle, clientsBody } = lagClientsCells(clientsStr, clientsShort);
+    const unsafe = isUnsafeConsumerGroupOpsAllowed();
+    const actionCell = unsafe
+        ? `<td class="lag-action-cell lag-col-actions">
+                    <div class="lag-action-buttons">
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
+                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
+                    </div>
+                </td>`
+        : '<td class="lag-action-cell lag-col-actions" aria-hidden="true"></td>';
+    tr.innerHTML = `
+                <td class="topic-cell">${escapeHtml(g.groupId)}</td>
+                <td>${escapeHtml(String(g.state))}</td>
+                <td>${g.memberCount}</td>
+                <td class="lag-clients-cell" title="${clientsTitle}">${clientsBody}</td>
+                <td>${pr.partition}</td>
+                <td>${committedCell}</td>
+                <td>${escapeHtml(String(pr.logEnd))}</td>
+                <td>${lagCell}</td>
+                ${actionCell}
+            `;
+    body.appendChild(tr);
+}
+
+function appendLagOverviewRows(body, data) {
+    for (const g of data.groups) {
+        const clients = (g.members || []).map((m) => m.clientId || m.memberId).filter(Boolean);
+        const clientsStr = clients.join(', ');
+        const clientsShort = clientsStr.length > 48 ? `${clientsStr.slice(0, 45)}…` : clientsStr;
+        for (const pr of g.partitions) {
+            appendLagPartitionRow(body, g, pr, clientsStr, clientsShort);
+        }
+    }
+}
+
+function bindLagOverviewRowActions(body) {
+    body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-reset-group') || '');
+            } catch (err) {
+                logDebug('decode lag-reset-group', err);
+                return;
+            }
+            if (!groupId) return;
+            handleLagReset(groupId);
+        });
+    });
+    body.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-delete-group') || '');
+            } catch (err) {
+                logDebug('decode lag-delete-group', err);
+                return;
+            }
+            if (!groupId) return;
+            handleLagDelete(groupId);
+        });
+    });
+}
+
+function renderLagOverviewResult(data) {
+    const body = document.getElementById('lagTableBody');
+    const empty = document.getElementById('lagEmptyState');
+    const status = document.getElementById('lagStatus');
+    if (!body || !empty || !status) return;
+    lagOverviewData = data;
+
+    status.textContent = `Scanned ${data.scannedGroupCount} groups — ${data.matchedGroupCount} with commits on "${data.topic}".`;
+
+    if (!data.groups.length) {
+        body.innerHTML = '';
+        empty.textContent = 'No consumer groups have committed offsets for this topic yet.';
+        empty.style.display = 'block';
+        setLagResetControlsState();
+        return;
+    }
+
+    empty.style.display = 'none';
+    body.innerHTML = '';
+    appendLagOverviewRows(body, data);
+    bindLagOverviewRowActions(body);
+    setLagResetControlsState();
+}
+
+async function loadConsumerLagOverview() {
+    if (!lagTopic) {
+        showAlert('Consumer lag', 'Please select a topic.');
+        return;
+    }
+    const status = document.getElementById('lagStatus');
+    if (status) status.textContent = 'Loading…';
+    showLoading();
+    try {
+        const data = await withKafkaAuthRecovery(lagTopic || '', async (kafka) =>
+            getConsumerLagOverview(kafka, lagTopic));
+        renderLagOverviewResult(data);
+    } catch (err) {
+        showAlert('Consumer lag', err.message);
+        clearLagOverviewUI();
+    } finally {
+        hideLoading();
+        setLagResetControlsState();
+    }
+}
+
+async function navigateToConsumerLag(topicName) {
+    if (!topicName) return;
+    if (!activeTopicList.includes(topicName)) {
+        activeTopicList = [...activeTopicList, topicName];
+    }
+    lagTopic = topicName;
+    populateTopicSelect();
+    clearLagOverviewUI();
+    const lagTab = document.getElementById('consumerLag');
+    if (!lagTab) return;
+    onMethodTabClick(lagTab);
+    await loadConsumerLagOverview();
+}
+
+function renderTopicHealthSection(th) {
+    const statsEl = document.getElementById('topicHealthStats');
+    const tbody = document.getElementById('topicHealthBody');
+    const empty = document.getElementById('topicHealthEmpty');
+    const trunc = document.getElementById('topicHealthTruncated');
+    if (!statsEl || !tbody || !empty) return;
+
+    if (!th || th.error) {
+        statsEl.innerHTML = '';
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        empty.textContent = (th && th.error)
+            ? `Topic health could not be loaded: ${th.error}`
+            : '—';
+        if (trunc) trunc.textContent = '';
+        return;
+    }
+
+    const t = th.totals;
+    statsEl.innerHTML = `
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.partitions}</div><div class="cluster-stat-label">Partitions (user topics)</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.underReplicatedPartitions}</div><div class="cluster-stat-label">Under-replicated</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.offlineOrNoLeaderPartitions}</div><div class="cluster-stat-label">No leader</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${t.erroredPartitions}</div><div class="cluster-stat-label">Metadata errors</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${th.healthyTopics}</div><div class="cluster-stat-label">Topics with no issues</div></div>
+    `;
+
+    const issues = th.topicsWithIssues || [];
+    if (issues.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        empty.textContent = `All ${t.topics} non-internal topics look healthy in metadata (no under-replicated, leaderless, or errored partitions).`;
+        if (trunc) trunc.textContent = '';
+        return;
+    }
+
+    empty.style.display = 'none';
+    tbody.innerHTML = '';
+    issues.forEach((r) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td class="topic-cell">${escapeHtml(r.name)}</td>
+            <td>${r.partitionCount}</td>
+            <td>${r.underReplicated}</td>
+            <td>${r.offlineOrNoLeader}</td>
+            <td>${r.errors}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    if (trunc) {
+        trunc.textContent = th.truncatedIssues
+            ? `Showing first ${issues.length} of ${th.totalIssueTopics} topics that have at least one partition issue.`
+            : '';
+    }
+}
+
+function renderClusterMetadata(data) {
+    const summary = document.getElementById('clusterSummary');
+    const tbody = document.getElementById('clusterBrokersBody');
+    const status = document.getElementById('clusterStatus');
+    if (status) {
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+    if (!summary || !tbody) return;
+
+    renderTopicHealthSection(data.topicHealth);
+
+    const controller = data.controllerId;
+    const controllerBroker = (data.brokers || []).find((b) => b.nodeId === controller);
+    let controllerStr = '—';
+    if (controllerBroker) {
+        controllerStr = `${controllerBroker.host}:${controllerBroker.port} (node ${controller})`;
+    } else if (controller != null) {
+        controllerStr = `node ${controller}`;
+    }
+
+    const groupLabel = data.groupCount === null ? '—' : String(data.groupCount);
+
+    summary.innerHTML = `
+        <div class="cluster-stat"><div class="cluster-stat-value">${escapeHtml(String(data.clusterId))}</div><div class="cluster-stat-label">Cluster ID</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${data.brokerCount}</div><div class="cluster-stat-label">Brokers (metadata)</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${data.topicCount}</div><div class="cluster-stat-label">Topics (non-internal)</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value">${groupLabel}</div><div class="cluster-stat-label">Consumer groups</div></div>
+        <div class="cluster-stat"><div class="cluster-stat-value cluster-stat-value--sm">${escapeHtml(controllerStr)}</div><div class="cluster-stat-label">Controller</div></div>
+    `;
+
+    tbody.innerHTML = '';
+    [...(data.brokers || [])].sort((a, b) => a.nodeId - b.nodeId).forEach((b) => {
+        const tr = document.createElement('tr');
+        const role = b.isController ? 'Controller' : 'Broker';
+        const boot = b.inBootstrap ? 'Yes' : 'No';
+        tr.innerHTML = `
+            <td>${b.nodeId}</td>
+            <td class="topic-cell">${escapeHtml(b.endpoint)}</td>
+            <td>${role}</td>
+            <td>${boot}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+async function loadClusterOverview() {
+    showLoading();
+    try {
+        const configured = (envConfig && activeEnv && envConfig[activeEnv])
+            ? envConfig[activeEnv].brokers
+            : [];
+        const data = await withKafkaAuthRecovery('', async (kafka) =>
+            getClusterMetadata(kafka, configured));
+        renderClusterMetadata(data);
+    } catch (err) {
+        showAlert('Cluster overview', err.message);
+    } finally {
+        hideLoading();
+    }
+}
+
+function wireClusterOverviewControls() {
+    const btn = document.getElementById('clusterRefreshButton');
+    if (btn) btn.addEventListener('click', () => loadClusterOverview());
+}
+
+function wireLagOverviewControls() {
+    const btn = document.getElementById('lagLoadButton');
+    if (btn) btn.addEventListener('click', () => loadConsumerLagOverview());
+    setLagResetControlsState();
+}
+
+function ensureTopicInList(topicName) {
+    if (!activeTopicList.includes(topicName)) {
+        activeTopicList = [...activeTopicList, topicName];
+    }
+}
+
+async function useTopic(topicName, methodId) {
+    ensureTopicInList(topicName);
+    onMethodTabClick(document.getElementById(methodId));
+    populateTopicSelect();
+    onTopicChange(topicName, methodId);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    initializeThemeToggle();
+    loadAppMode();
+    applyAppModeToBody();
+    initializeAppModeToggle();
     showLoading();
     loadConfig().then(() => {
-        
-        // try {
-        //     const valid = ajv.validate(schema, envConfig);
-        //     if (!valid) {
-        //         throw new Error('Invalid configuration format');
-        //     }
-        // } catch (error) {
-        //     showAlert("Config Error", "Invalid configurations. Consider setting up manually. Existing...", error.message);
-        //     // setInterval(() => {
-        //     //     window.close();
-        //     // }, 4000);
-        // }
-        
-        activeEnv = Object.keys(envConfig)[0];
-        activeTopicList = envConfig[activeEnv].topicList;
+        const envIds = Object.keys(envConfig);
+        const prefs = loadPreferences();
+        const savedEnv = prefs.lastActiveEnvId;
+        activeEnv = (savedEnv && envIds.includes(savedEnv)) ? savedEnv : envIds[0];
+        activeTopicList = (envConfig[activeEnv].topicList || []).slice();
+        activeMethod = resolveMethodForEnv(activeEnv);
 
         initializeEditor();
         initializeConsumer();
-    
-        const buttonContainer = document.getElementById('sidebar');
+        populateTokenInsert();
+        refreshTemplateSelect();
+
+        const envSelect = document.getElementById('envSelect');
         const formatButton = document.getElementById('formatButton');
-    
-        Object.values(envConfig).forEach(env => {
-            buildEnvButton(buttonContainer, env);
+
+        const producerFormatSelect = document.getElementById('producerFormatSelect');
+        if (producerFormatSelect) {
+            producerFormatSelect.addEventListener('change', (e) => {
+                applyProducerFormat(e.target.value);
+            });
+        }
+        let storedProducerFormat = null;
+        try {
+            storedProducerFormat = window.localStorage.getItem(PRODUCER_FORMAT_STORAGE_KEY);
+        } catch (err) {
+            logDebug('localStorage producer format read', err);
+        }
+        applyProducerFormat(PAYLOAD_FORMATS[storedProducerFormat] ? storedProducerFormat : DEFAULT_FORMAT, { skipStorage: true });
+
+        Object.values(envConfig).forEach((env) => {
+            const option = document.createElement('option');
+            option.value = env.id;
+            option.textContent = env.label;
+            envSelect.appendChild(option);
         });
-    
-        const methodTabContainer = document.querySelector('#main #tabs');
-        Object.values(method).forEach(method => {
-            buildMethodTab(methodTabContainer, method);
+        envSelect.value = activeEnv;
+        envSelect.addEventListener('change', (event) => {
+            onEnvChange(event.target.value);
         });
-    
-        Object.values(method).forEach(method => {
-            document.getElementById(method.containerId).style.display = method.id === activeMethod ? 'flex' : 'none';
-        });
-    
-        onEnvBtnClick(document.getElementById(activeEnv));
-    
+
+        rebuildMethodTabs();
+
+        onEnvChange(activeEnv);
+        updateSummaryCards();
+
         document.getElementById('produceButton').addEventListener('click', async () => {
             showLoading();
             try {
-                const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
-                await produceMessage(kafka, activeTopic, editor.getValue());
+                const expanded = expandTokens(editor.getValue());
+                await withKafkaAuthRecovery(producerTopic || '', async (kafka) => {
+                    await produceMessage(kafka, producerTopic, expanded);
+                });
             } catch (error) {
-                showAlert("Kafka Producer Error", error.message);
+                showAlert('Kafka Producer Error', error.message);
             }
             hideLoading();
         });
-    
+
         document.getElementById('clearMessages').addEventListener('click', () => {
-            consumer.setValue('');
+            clearConsumedMessages();
         });
-    
+
         document.getElementById('consumeButton').addEventListener('click', async () => {
             showLoading();
-    
             const consumerTab = document.getElementById('consumer');
             consumerTab.addEventListener('click', () => {
                 consumer.refresh();
-                // Scroll to the bottom of the editor
                 const lastLine = consumer.getScrollInfo().height;
                 consumer.scrollTo(0, lastLine);
             });
-    
+
             if (!consumeStarted) {
                 try {
-                    const kafka = await createKafkaClient(envConfig[activeEnv].brokers);
-                    await consumeMessages(kafka, activeTopic, kafkaSafeStreamGroup, (message) => {
-                        const formattedMessage = JSON.stringify(JSON.parse(message), null, 2);
-                        consumer.setValue(consumer.getValue() + formattedMessage + LINE_SEPARATOR);
-                        // Scroll to the bottom of the editor
-                        const lastLine = consumer.getScrollInfo().height;
-                        consumer.scrollTo(0, lastLine);
+                    const opts = readConsumerOptions();
+                    if (!opts.topic) {
+                        showAlert('Consumer', 'Please select a topic first.');
+                        hideLoading();
+                        return;
+                    }
+                    consumerGroup = opts.groupId;
+                    setGroupForTopic(activeEnv, opts.topic, consumerGroup);
+                    updateSummaryCards();
+
+                    await withKafkaAuthRecovery(opts.topic || '', pingKafkaAuth);
+                    const kafka = await getKafkaClient();
+                    setConsumerConsumeSummary(opts);
+                    setConsumeRunningUI(true);
+                    if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
+                        showConsumerSeekingStatus({
+                            partition: opts.partition,
+                            offset: opts.offset,
+                        });
+                    }
+                    consumeMessages(kafka, opts, (msg) => {
+                        pushConsumedMessage(msg);
+                    }, () => {
+                        resetConsumerIdleWatchdog();
+                        resetConsumeUIState();
+                    }).catch((err) => {
+                        showAlert('Kafka Consumer Error', err.message);
+                        resetConsumerIdleWatchdog();
+                        resetConsumeUIState();
                     }).finally(() => {
                         hideLoading();
                     });
-                    let consumeBtn = document.getElementById('consumeButton');
-                    consumeBtn.innerHTML = 'Stop Consuming';
-                    consumeBtn.style.backgroundColor = '#dc3545';
+
                     consumeStarted = true;
-                    let consumingTopic = '[' + activeEnv.toUpperCase() + ' ← ' + activeTopic + ']';
-                    window.refreshIntervalId = setInterval(function () {
-                        consumerTab.innerHTML = consumerTab.innerHTML === '⚫ Consumer ' + consumingTopic ? '🔴 Consumer ' + consumingTopic : '⚫ Consumer ' + consumingTopic;
+                    consumerBlinkOn = false;
+                    window.refreshIntervalId = setInterval(() => {
+                        consumerBlinkOn = !consumerBlinkOn;
+                        renderConsumerTabBlink(consumerBlinkOn);
                     }, 1000);
-    
+                    applyConsumerGroupFieldState();
+                    if (!document.hasFocus()) {
+                        scheduleConsumerBlurIdleTimer();
+                    }
                 } catch (error) {
-                    showAlert("Kafka Consumer Error", error.message);
+                    showAlert('Kafka Consumer Error', error.message);
+                    resetConsumerIdleWatchdog();
+                    resetConsumeUIState();
+                    hideLoading();
                 }
             } else {
-                await stopConsuming().finally(() => {
+                try {
+                    await stopConsumingAndResetUI();
+                } finally {
                     hideLoading();
-                });
-                clearInterval(window.refreshIntervalId);
-                consumerTab.innerHTML = '⚫ Consumer';
-                let consumeBtn = document.getElementById('consumeButton');
-                consumeBtn.innerHTML = 'Start Consuming';
-                consumeBtn.style.backgroundColor = '#007bff';
-                consumeStarted = false;
+                }
             }
         });
-    
+
         document.getElementById('payload').addEventListener('keyup', () => {
-            try {
-                JSON.parse(editor.getValue());
-                validPayload = true;
-                formatButton.disabled = false;
-            } catch (e) {
-                validPayload = false;
-                formatButton.disabled = true;
-            }
-            reloadProduceButton();
+            revalidateProducerPayload();
         });
-    
+        document.getElementById('payload').addEventListener('input', () => {
+            revalidateProducerPayload();
+        });
+
         formatButton.addEventListener('click', () => {
             try {
-                const formatted = JSON.stringify(JSON.parse(editor.getValue()), null, 2);
+                const formatted = formatPayload(producerFormat, editor.getValue());
                 editor.setValue(formatted);
             } catch (error) {
-                showAlert("JSON Format Error", "Error formatting JSON. Please check the JSON and try again.", error.message);
+                const label = (PAYLOAD_FORMATS[producerFormat] || PAYLOAD_FORMATS[DEFAULT_FORMAT]).label;
+                showAlert(`${label} format error`, error.message || 'Could not format the payload.');
             }
-            reloadProduceButton();
+            revalidateProducerPayload();
         });
+
+        wireConsumerControls();
+        let storedConsumerFormat = null;
+        try {
+            storedConsumerFormat = window.localStorage.getItem(CONSUMER_FORMAT_STORAGE_KEY);
+        } catch (err) {
+            logDebug('localStorage consumer format read', err);
+        }
+        applyConsumerFormat(PAYLOAD_FORMATS[storedConsumerFormat] ? storedConsumerFormat : DEFAULT_FORMAT, { skipStorage: true });
+
+        wireTemplateControls();
+        wireTopicsBrowserControls();
+        wireLagOverviewControls();
+        wireClusterOverviewControls();
+        wireSetupButton();
+        window.addEventListener('blur', onWindowBlurForConsumerIdle);
+        window.addEventListener('focus', onWindowFocusForConsumerIdle);
+        rendererInitialized = true;
+        if (pendingConfigUpdate) {
+            const cfg = pendingConfigUpdate;
+            pendingConfigUpdate = null;
+            reapplyConfig(cfg).catch((err) => showAlert('Failed to apply configuration', err.message));
+        }
     }).finally(() => {
         hideLoading();
     });
+
+    ipcRenderer.on('config-updated', (_event, newConfig) => {
+        if (!rendererInitialized) {
+            pendingConfigUpdate = newConfig;
+            return;
+        }
+        reapplyConfig(newConfig).catch((err) => {
+            showAlert('Failed to apply configuration', err.message);
+        });
+    });
 });
+
+function formatConsumeSummaryText(opts) {
+    if (!opts) return '';
+    let startLine;
+    const sm = opts.startMode || 'earliest';
+    if (sm === 'earliest') {
+        startLine = 'Beginning';
+    } else if (sm === 'offset') {
+        const partLabel = opts.partition == null ? 'All partitions' : `Partition ${opts.partition}`;
+        const off = opts.offset != null && String(opts.offset) !== ''
+            ? String(opts.offset)
+            : '—';
+        startLine = `Specific offset (${partLabel}, offset ${off})`;
+    } else {
+        startLine = 'Now (latest)';
+    }
+    const parts = [`Start from: ${startLine}`];
+    if (opts.maxMessages != null && Number.isFinite(Number(opts.maxMessages))) {
+        parts.push(`Max messages: ${opts.maxMessages}`);
+    }
+    return parts.join(' · ');
+}
+
+function setConsumerConsumeSummary(opts) {
+    const text = opts ? formatConsumeSummaryText(opts) : '';
+    const hidden = !opts;
+    ['consumerConsumeSummary', 'consumerOptionsConsumeSummary'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.hidden = hidden;
+    });
+}
+
+function setConsumeRunningUI(running) {
+    const consumeBtn = document.getElementById('consumeButton');
+    if (!consumeBtn) return;
+    const optionsSection = document.getElementById('optionsConsumerSection');
+    if (optionsSection) {
+        optionsSection.classList.toggle('is-consuming', !!running);
+    }
+    if (!running) {
+        setConsumerConsumeSummary(null);
+    }
+    consumeBtn.innerHTML = running ? 'Stop Consuming' : 'Start Consuming';
+    consumeBtn.style.backgroundColor = running ? '#dc3545' : '';
+    consumeBtn.disabled = !running && (consumerTopic === '');
+    const fields = ['startModeGroup', 'partitionSelect', 'offsetInput', 'maxMessagesInput', 'consumerGroupInput'];
+    fields.forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const inputs = el.tagName === 'INPUT' || el.tagName === 'SELECT' ? [el] : el.querySelectorAll('input, select');
+        inputs.forEach((i) => { i.disabled = running; });
+    });
+}
+
+function readConsumerOptions() {
+    const maxMessagesRaw = document.getElementById('maxMessagesInput').value;
+    const groupRaw = document.getElementById('consumerGroupInput').value.trim();
+    if (appMode === 'basic') {
+        return {
+            topic: consumerTopic,
+            groupId: groupRaw || DEFAULT_GROUP,
+            /* Basic hides “Start from”; use beginning so test topics with existing data show messages (latest only shows new records after join). */
+            startMode: 'earliest',
+            partition: null,
+            offset: null,
+            maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
+        };
+    }
+    const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'earliest';
+    const partitionRaw = document.getElementById('partitionSelect').value;
+    const offsetRaw = document.getElementById('offsetInput').value;
+    return {
+        topic: consumerTopic,
+        groupId: groupRaw || DEFAULT_GROUP,
+        startMode,
+        partition: partitionRaw === '' ? null : Number(partitionRaw),
+        offset: startMode === 'offset' && offsetRaw !== '' ? offsetRaw : null,
+        maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
+    };
+}
+
+function wireConsumerStartModeHelp() {
+    const btn = document.getElementById('consumerStartModeHelpBtn');
+    const pop = document.getElementById('consumerStartModeHelpTooltip');
+    if (!btn || !pop) return;
+
+    function detachGlobalListeners() {
+        document.removeEventListener('click', onDocClick);
+        document.removeEventListener('keydown', onKeydown);
+    }
+
+    function setOpen(open) {
+        detachGlobalListeners();
+        pop.hidden = !open;
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) {
+            document.addEventListener('keydown', onKeydown);
+            setTimeout(() => {
+                document.addEventListener('click', onDocClick);
+            }, 0);
+        }
+    }
+
+    function onDocClick(ev) {
+        if (btn.contains(ev.target) || pop.contains(ev.target)) return;
+        setOpen(false);
+    }
+
+    function onKeydown(ev) {
+        if (ev.key === 'Escape') setOpen(false);
+    }
+
+    btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        setOpen(pop.hidden);
+    });
+}
+
+function wireConsumerControls() {
+    loadConsumerTableViewPreference();
+    const tableToggle = document.getElementById('consumerTableViewToggle');
+    if (tableToggle) {
+        tableToggle.addEventListener('change', () => {
+            consumerTableView = tableToggle.checked;
+            persistConsumerTableViewPreference(consumerTableView);
+            applyFilter();
+        });
+    }
+
+    const exportBtn = document.getElementById('exportConsumedButton');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', () => {
+            handleExportConsumed().catch((err) => {
+                showAlert('Export failed', err.message || String(err));
+            });
+        });
+    }
+
+    wireConsumerTablePayloadViewer();
+
+    const startModeRadios = document.querySelectorAll('input[name="startMode"]');
+    const offsetRow = document.getElementById('offsetRow');
+    startModeRadios.forEach((r) => {
+        r.addEventListener('change', () => {
+            const mode = document.querySelector('input[name="startMode"]:checked').value;
+            offsetRow.style.display = mode === 'offset' ? 'flex' : 'none';
+        });
+    });
+
+    const refreshPartitionsButton = document.getElementById('refreshPartitionsButton');
+    if (refreshPartitionsButton) {
+        refreshPartitionsButton.addEventListener('click', () => {
+            if (consumerTopic) refreshPartitions(consumerTopic);
+        });
+    }
+
+    const filterInput = document.getElementById('filterInput');
+    const filterRegex = document.getElementById('filterRegex');
+    if (filterInput) filterInput.addEventListener('input', applyFilter);
+    if (filterRegex) filterRegex.addEventListener('change', applyFilter);
+
+    const groupInput = document.getElementById('consumerGroupInput');
+    if (groupInput) {
+        groupInput.addEventListener('change', () => {
+            consumerGroup = groupInput.value.trim() || DEFAULT_GROUP;
+            updateSummaryCards();
+            if (consumerTopic) {
+                setGroupForTopic(activeEnv, consumerTopic, consumerGroup);
+            }
+        });
+    }
+
+    const consumerFormatSelect = document.getElementById('consumerFormatSelect');
+    if (consumerFormatSelect) {
+        consumerFormatSelect.addEventListener('change', (e) => {
+            applyConsumerFormat(e.target.value);
+        });
+    }
+
+    wireConsumerStartModeHelp();
+}
+
+function wireTemplateControls() {
+    const templateSelect = document.getElementById('templateSelect');
+    const loadBtn = document.getElementById('loadTemplateButton');
+    const updateBtn = document.getElementById('updateTemplateButton');
+    const saveBtn = document.getElementById('saveTemplateButton');
+    const deleteBtn = document.getElementById('deleteTemplateButton');
+
+    if (templateSelect) {
+        templateSelect.addEventListener('change', () => {
+            selectedTemplateId = templateSelect.value;
+            refreshTemplateButtons();
+        });
+    }
+    if (loadBtn) {
+        loadBtn.addEventListener('click', () => {
+            if (!selectedTemplateId) return;
+            const tpl = templatesApi.getTemplate(selectedTemplateId);
+            if (tpl && editor) {
+                editor.setValue(tpl.payload || '');
+                applyProducerFormat(tpl.format || DEFAULT_FORMAT, { skipStorage: true });
+            }
+        });
+    }
+    if (saveBtn) {
+        saveBtn.addEventListener('click', async () => {
+            const name = await showPrompt('Save template', 'Template name:', '');
+            if (!name) return;
+            try {
+                const tpl = templatesApi.saveTemplate({
+                    name,
+                    payload: editor ? editor.getValue() : '',
+                    format: producerFormat,
+                });
+                selectedTemplateId = tpl.id;
+                refreshTemplateSelect();
+            } catch (err) {
+                showAlert('Save template failed', err.message);
+            }
+        });
+    }
+    if (updateBtn) {
+        updateBtn.addEventListener('click', () => {
+            if (!selectedTemplateId) return;
+            try {
+                templatesApi.updateTemplate(selectedTemplateId, {
+                    payload: editor ? editor.getValue() : '',
+                    format: producerFormat,
+                });
+                refreshTemplateSelect();
+            } catch (err) {
+                showAlert('Update template failed', err.message);
+            }
+        });
+    }
+    if (deleteBtn) {
+        deleteBtn.addEventListener('click', async () => {
+            if (!selectedTemplateId) return;
+            const ok = await showConfirm('Delete template', 'Are you sure you want to delete this template?');
+            if (!ok) return;
+            try {
+                templatesApi.deleteTemplate(selectedTemplateId);
+                selectedTemplateId = '';
+                refreshTemplateSelect();
+            } catch (err) {
+                showAlert('Delete template failed', err.message);
+            }
+        });
+    }
+}
+
+function wireTopicsBrowserControls() {
+    const refreshBtn = document.getElementById('refreshTopicsButton');
+    const searchInput = document.getElementById('topicsSearchInput');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => loadTopicsBrowser(true));
+    }
+    if (searchInput) {
+        searchInput.addEventListener('input', renderTopicsTable);
+    }
+}
+
+function wireSetupButton() {
+    const setupBtn = document.getElementById('setupButton');
+    if (setupBtn) {
+        setupBtn.addEventListener('click', () => {
+            ipcRenderer.send('open-setup-window', document.body.getAttribute('data-theme') || 'dark');
+        });
+    }
+}
+
+async function reapplyConfig(newConfig) {
+    showLoading();
+    try {
+        const valid = ajv.validate(schema, newConfig);
+        if (!valid) {
+            throw new Error('Invalid configuration format');
+        }
+
+        if (consumeStarted) {
+            await stopConsumingAndResetUI();
+        }
+
+        envConfig = newConfig;
+        Object.keys(envConfig).forEach((envId) => {
+            envConfig[envId].connection = normalizeConnection(envConfig[envId].connection);
+        });
+        invalidateKafkaClientCache();
+        topicsCache = [];
+
+        const envSelect = document.getElementById('envSelect');
+        envSelect.innerHTML = '';
+        Object.values(envConfig).forEach((env) => {
+            const option = document.createElement('option');
+            option.value = env.id;
+            option.textContent = env.label;
+            envSelect.appendChild(option);
+        });
+
+        const envIds = Object.keys(envConfig);
+        const nextEnv = envIds.includes(activeEnv) ? activeEnv : envIds[0];
+        envSelect.value = nextEnv;
+        onEnvChange(nextEnv);
+        if (activeMethod === 'topicsBrowser' && document.getElementById('topicsBrowser')) {
+            loadTopicsBrowser(true);
+        }
+    } finally {
+        hideLoading();
+        applyConsumerGroupFieldState();
+    }
+}
 
 function reloadProduceButton() {
     const produceButton = document.getElementById('produceButton');
-    produceButton.disabled = activeTopic === '' || !validPayload;
+    if (!produceButton) return;
+    produceButton.disabled = producerTopic === '' || !validPayload;
 }
 
-const onEnvBtnClick = (btn) => {
+const onEnvChange = (envId) => {
     showLoading();
-    document.querySelectorAll('#sidebar button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
 
-    activeEnv = btn.id;
-    activeTopicList = envConfig[activeEnv].topicList;
-    activeTopic = '';
+    activeEnv = envId;
+    activeTopicList = (envConfig[activeEnv].topicList || []).slice();
+    producerTopic = '';
+    consumerTopic = '';
+    consumerGroup = DEFAULT_GROUP;
+    document.getElementById('envSelect').value = activeEnv;
+
+    const groupInput = document.getElementById('consumerGroupInput');
+    if (groupInput) groupInput.value = consumerGroup;
 
     if (!consumeStarted) {
         const stopConsumeButton = document.getElementById('consumeButton');
         stopConsumeButton.disabled = true;
     }
 
-    activeMethod = 'producer';
-
-    const topicContainer = document.querySelector('#main #content #topics');
-    while (topicContainer.firstChild) {
-        topicContainer.removeChild(topicContainer.firstChild);
+    activeMethod = resolveMethodForEnv(activeEnv);
+    const methodTab = document.getElementById(activeMethod);
+    if (methodTab) {
+        onMethodTabClick(methodTab);
+    } else {
+        activeMethod = 'producer';
+        onMethodTabClick(document.getElementById('producer'));
     }
-    topicContainer.appendChild(document.createElement('h3')).textContent = 'TOPICS';
+    populateTopicSelect();
+    lagTopic = '';
+    populateLagTopicSelect();
+    clearLagOverviewUI();
 
-    activeTopicList.forEach((topic, index) => {
-        setTimeout(() => {
-            buildTopicButton(topicContainer, topic);
-        }, index * 100);
-    });
+    topicsCache = [];
+    invalidateKafkaClientCache();
 
     reloadProduceButton();
+    updateSummaryCards();
+    applyConsumerGroupFieldState();
+    syncUnsafeConsumerGroupBodyAttr();
 
+    persistLastEnv(activeEnv);
     hideLoading();
+};
+
+const onTopicChange = (topic, methodId) => {
+    showLoading();
+    const m = methodId || activeMethod;
+    if (m === 'consumer') {
+        consumerTopic = topic;
+        consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
+        const groupInput = document.getElementById('consumerGroupInput');
+        if (groupInput) groupInput.value = consumerGroup;
+
+        const stopConsumeButton = document.getElementById('consumeButton');
+        if (!consumeStarted) {
+            stopConsumeButton.disabled = consumerTopic === '';
+        }
+        if (consumerTopic) {
+            refreshPartitions(consumerTopic);
+        } else {
+            refreshPartitions('');
+        }
+    } else if (m === 'producer') {
+        producerTopic = topic;
+    }
+    reloadProduceButton();
+    updateSummaryCards();
+    applyConsumerGroupFieldState();
+    hideLoading();
+};
+
+function loadLazyMethodTabData(tabId) {
+    if (tabId === 'topicsBrowser' && topicsCache.length === 0) {
+        loadTopicsBrowser(true);
+    }
+    if (tabId === 'consumerLag') {
+        populateLagTopicSelect();
+    }
+    if (tabId === 'clusterInfo') {
+        loadClusterOverview();
+    }
 }
 
-const onTopicBtnClick = (btn) => {
-    showLoading();
-    document.querySelectorAll('#main #content #topics button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeTopic = btn.id;
+function syncTopicSelectValueForTab(tab) {
+    const topicSelect = document.getElementById('topicSelect');
+    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag' && tab.id !== 'clusterInfo') {
+        topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
+    }
+}
+
+function syncConsumerChromeForActiveTab(tab) {
+    if (tab.id !== 'consumer') return;
+    consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
+    const groupInput = document.getElementById('consumerGroupInput');
+    if (groupInput) groupInput.value = consumerGroup;
+    if (consumerTopic) {
+        refreshPartitions(consumerTopic);
+    } else {
+        refreshPartitions('');
+    }
     const stopConsumeButton = document.getElementById('consumeButton');
-    stopConsumeButton.disabled = false;
-    reloadProduceButton();
-    hideLoading();
+    if (!consumeStarted && stopConsumeButton) {
+        stopConsumeButton.disabled = consumerTopic === '';
+    }
 }
 
 const onMethodTabClick = (tab) => {
     activeMethod = tab.id;
-    document.querySelectorAll('#main #tabs button').forEach(b => b.classList.remove('active'));
+    if (activeEnv) {
+        persistLastMethodForEnv(activeEnv, activeMethod);
+    }
+    document.querySelectorAll('#tabs button').forEach((b) => b.classList.remove('active'));
     tab.classList.add('active');
 
-    Object.values(method).forEach(method => {
-        document.getElementById(method.containerId).style.display = method.id === tab.id ? 'flex' : 'none';
+    Object.values(method).forEach((m) => {
+        document.getElementById(m.containerId).style.display = m.id === tab.id ? 'flex' : 'none';
     });
-}
 
-const buildEnvButton = (buttonContainer, env) => {
-    const btn = document.createElement('button');
-    btn.textContent = env.label;
-    btn.id = env.id;
-    btn.onclick = () => onEnvBtnClick(btn);
-    if (env.id === activeEnv) {
-        btn.classList.add('active');
+    loadLazyMethodTabData(tab.id);
+    applyActiveMethodLayout();
+    syncTopicSelectValueForTab(tab);
+    syncConsumerChromeForActiveTab(tab);
+    if (tab.id === 'producer') {
+        reloadProduceButton();
     }
-    buttonContainer.appendChild(btn);
-}
 
-const buildMethodTab = (methodTabContainer, method) => {
+    updateSummaryCards();
+};
+
+const buildMethodTab = (methodTabContainer, m) => {
     const tab = document.createElement('button');
-    tab.textContent = method.label;
-    tab.id = method.id;
+    tab.type = 'button';
+    tab.id = m.id;
     tab.classList.add('tab');
+    tab.title = m.label;
+    if (m.icon) {
+        const icon = document.createElement('span');
+        icon.classList.add('tab-icon');
+        icon.setAttribute('aria-hidden', 'true');
+        icon.innerHTML = m.icon;
+        tab.appendChild(icon);
+    }
+    const label = document.createElement('span');
+    label.classList.add('tab-label');
+    label.textContent = m.label;
+    tab.appendChild(label);
+    if (m.id === 'consumer') {
+        const status = document.createElement('span');
+        status.classList.add('tab-status');
+        tab.appendChild(status);
+    }
     tab.onclick = () => onMethodTabClick(tab);
-    if (method.id === activeMethod) {
+    if (m.id === activeMethod) {
         tab.classList.add('active');
     }
     methodTabContainer.appendChild(tab);
-}
+};
 
-const buildTopicButton = (topicContainer, topic) => {
-    const btn = document.createElement('button');
-    btn.classList.add('list-item');
-    btn.textContent = topic;
-    btn.id = topic;
-    btn.onclick = () => onTopicBtnClick(btn);
-    if (topic.id === activeTopic) {
-        btn.classList.add('active');
-    }
-    topicContainer.appendChild(btn);
-}
+const populateTopicSelect = () => {
+    const topicSelect = document.getElementById('topicSelect');
+    topicSelect.innerHTML = '';
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select a topic...';
+    topicSelect.appendChild(placeholder);
+
+    activeTopicList.forEach((topic) => {
+        const option = document.createElement('option');
+        option.value = topic;
+        option.textContent = topic;
+        topicSelect.appendChild(option);
+    });
+
+    topicSelect.value = activeMethod === 'consumer' ? consumerTopic : producerTopic;
+    topicSelect.onchange = (event) => onTopicChange(event.target.value);
+};
 
 const showLoading = () => {
     document.getElementById('loading-container').style.display = 'flex';
-}
+};
 
 const hideLoading = () => {
     document.getElementById('loading-container').style.display = 'none';
-}
+};
 
 function showAlert(topic, message) {
     const alertBox = document.getElementById('custom-alert');
@@ -368,6 +2906,124 @@ function closeAlert() {
     alertBox.style.display = 'none';
 }
 
+const OPTIONS_WIDTH_STORAGE_KEY = 'kss-options-width';
+const OPTIONS_WIDTH_MIN = 268;
+const OPTIONS_WIDTH_MAX = 560;
+const OPTIONS_WIDTH_DEFAULT = 352;
+
+function clampOptionsWidth(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return OPTIONS_WIDTH_DEFAULT;
+    return Math.min(OPTIONS_WIDTH_MAX, Math.max(OPTIONS_WIDTH_MIN, Math.round(num)));
+}
+
+function applyOptionsWidth(width) {
+    const clamped = clampOptionsWidth(width);
+    const optionsPanel = document.getElementById('topics');
+    if (optionsPanel) {
+        optionsPanel.style.setProperty('--options-width', `${clamped}px`);
+    }
+    return clamped;
+}
+
+function initializeOptionsResizer() {
+    const optionsPanel = document.getElementById('topics');
+    const resizer = document.getElementById('optionsResizer');
+    if (!optionsPanel || !resizer) return;
+
+    let stored = null;
+    try {
+        stored = window.localStorage.getItem(OPTIONS_WIDTH_STORAGE_KEY);
+    } catch (err) {
+        logDebug('localStorage options width read', err);
+    }
+    applyOptionsWidth(stored != null ? stored : OPTIONS_WIDTH_DEFAULT);
+
+    let dragStartX = 0;
+    let dragStartWidth = 0;
+    let dragging = false;
+
+    function onMouseMove(event) {
+        if (!dragging) return;
+        const delta = event.clientX - dragStartX;
+        applyOptionsWidth(dragStartWidth + delta);
+    }
+
+    function onMouseUp() {
+        if (!dragging) return;
+        dragging = false;
+        resizer.classList.remove('is-dragging');
+        document.body.classList.remove('options-resizing');
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        const finalWidth = clampOptionsWidth(optionsPanel.getBoundingClientRect().width);
+        try {
+            window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(finalWidth));
+        } catch (err) {
+            logDebug('localStorage options width write', err);
+        }
+    }
+
+    resizer.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        dragging = true;
+        dragStartX = event.clientX;
+        dragStartWidth = optionsPanel.getBoundingClientRect().width;
+        resizer.classList.add('is-dragging');
+        document.body.classList.add('options-resizing');
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+
+    resizer.addEventListener('dblclick', () => {
+        applyOptionsWidth(OPTIONS_WIDTH_DEFAULT);
+        try {
+            window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(OPTIONS_WIDTH_DEFAULT));
+        } catch (err) {
+            logDebug('localStorage options width default', err);
+        }
+    });
+}
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'kss-sidebar-collapsed';
+
+function applySidebarCollapsedState(collapsed) {
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('sidebarCollapseToggle');
+    if (!sidebar || !toggle) return;
+    sidebar.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+    toggle.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    toggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+}
+
+function initializeSidebarCollapse() {
+    const toggle = document.getElementById('sidebarCollapseToggle');
+    if (!toggle) return;
+
+    let stored = null;
+    try {
+        stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+    } catch (err) {
+        logDebug('localStorage sidebar read', err);
+    }
+    applySidebarCollapsedState(stored === '1');
+
+    toggle.addEventListener('click', () => {
+        const sidebar = document.getElementById('sidebar');
+        if (!sidebar) return;
+        const next = !sidebar.classList.contains('collapsed');
+        applySidebarCollapsedState(next);
+        try {
+            window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
+        } catch (err) {
+            logDebug('localStorage sidebar write', err);
+        }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    document.querySelector('.custom-alert-close').addEventListener('click', closeAlert);
+    document.querySelector('#custom-alert .custom-alert-close').addEventListener('click', closeAlert);
+    initializeOptionsResizer();
+    initializeSidebarCollapse();
 });
