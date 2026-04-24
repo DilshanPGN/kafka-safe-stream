@@ -2,6 +2,12 @@
 (function () {
     const STORAGE_KEY = 'kssPayloadViewer';
 
+    function logDebug(context, err) {
+        if (typeof console !== 'undefined' && console.debug) {
+            console.debug(`[kss] ${context}`, err);
+        }
+    }
+
     function modeForFormat(formatId) {
         if (formatId === 'xml') return 'xml';
         if (formatId === 'json') return { name: 'javascript', json: true };
@@ -12,7 +18,9 @@
         const raw = sessionStorage.getItem(STORAGE_KEY);
         try {
             sessionStorage.removeItem(STORAGE_KEY);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('sessionStorage.removeItem', err);
+        }
 
         if (!raw) {
             document.body.innerHTML = '<p style="padding:16px;font-family:system-ui,sans-serif;color:#64748b;">No payload to display.</p>';
@@ -22,7 +30,8 @@
         let data;
         try {
             data = JSON.parse(raw);
-        } catch (_) {
+        } catch (err) {
+            logDebug('JSON.parse payload viewer', err);
             document.body.textContent = 'Invalid payload data.';
             return;
         }
@@ -56,7 +65,9 @@
         window.addEventListener('resize', () => {
             try {
                 cm.refresh();
-            } catch (_) { /* ignore */ }
+            } catch (err) {
+                logDebug('CodeMirror.refresh', err);
+            }
         });
     }
 

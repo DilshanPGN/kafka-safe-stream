@@ -71,6 +71,12 @@ const THEME_STORAGE_KEY = 'kss-theme';
 const APP_MODE_STORAGE_KEY = 'kss-app-mode';
 const PREFS_PATH = path.join(os.homedir(), '.kss', 'preferences.json');
 
+function logDebug(context, err) {
+    if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+        console.debug(`[kss] ${context}`, err);
+    }
+}
+
 const PAYLOAD_FORMATS = {
     json: { id: 'json', label: 'JSON', cmMode: { name: 'javascript', json: true } },
     xml: { id: 'xml', label: 'XML', cmMode: 'xml' },
@@ -121,7 +127,9 @@ function loadPreferences() {
             const raw = fs.readFileSync(PREFS_PATH, 'utf8');
             return JSON.parse(raw) || {};
         }
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('preferences read', err);
+    }
     return {};
 }
 
@@ -231,14 +239,18 @@ function applyTheme(theme) {
     }
     try {
         localStorage.setItem(THEME_STORAGE_KEY, targetTheme);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage theme', err);
+    }
 }
 
 function initializeThemeToggle() {
     let savedTheme = 'dark';
     try {
         savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage theme read', err);
+    }
     applyTheme(savedTheme);
     const themeToggle = document.getElementById('themeToggle');
     if (themeToggle) {
@@ -252,7 +264,8 @@ function loadAppMode() {
     try {
         const stored = window.localStorage.getItem(APP_MODE_STORAGE_KEY);
         appMode = stored === 'basic' ? 'basic' : 'advanced';
-    } catch (_) {
+    } catch (err) {
+        logDebug('localStorage app mode', err);
         appMode = 'advanced';
     }
 }
@@ -317,7 +330,9 @@ function setAppMode(next) {
     appMode = nextMode;
     try {
         window.localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage app mode write', err);
+    }
     if (appMode === 'basic' && !['producer', 'consumer', 'consumerLag'].includes(activeMethod)) {
         activeMethod = 'producer';
     }
@@ -376,15 +391,20 @@ function renderConsumerTabBlink(show) {
     statusNode.textContent = show ? '●' : '';
 }
 
-function applyActiveMethodLayout() {
-    const hideTopicsChrome = activeMethod === 'topicsBrowser'
+function isTopicsBrowserChromeHidden() {
+    return activeMethod === 'topicsBrowser'
         || activeMethod === 'consumerLag'
         || activeMethod === 'clusterInfo';
+}
+
+function applyRibbonAndOptionsChrome(hideTopicsChrome) {
     const ribbon = document.getElementById('summaryCards');
     if (ribbon) ribbon.style.display = hideTopicsChrome ? 'none' : '';
     const optionsSection = document.getElementById('topics');
     if (optionsSection) optionsSection.style.display = hideTopicsChrome ? 'none' : '';
+}
 
+function applyProducerConsumerOptionSections() {
     const producerOptionsSection = document.getElementById('optionsProducerSection');
     const consumerOptionsSection = document.getElementById('optionsConsumerSection');
     if (producerOptionsSection) {
@@ -393,17 +413,26 @@ function applyActiveMethodLayout() {
     if (consumerOptionsSection) {
         consumerOptionsSection.style.display = activeMethod === 'consumer' ? '' : 'none';
     }
+}
 
+function applySummaryEnvGroupCards(hideTopicsChrome) {
     const envCard = document.getElementById('summaryCardActiveEnv');
     const groupCard = document.getElementById('summaryCardConsumerGroup');
     if (hideTopicsChrome) {
         if (envCard) envCard.style.display = '';
         if (groupCard) groupCard.style.display = '';
-    } else {
-        const hideActiveEnv = activeMethod === 'producer' || activeMethod === 'consumer';
-        if (envCard) envCard.style.display = hideActiveEnv ? 'none' : '';
-        if (groupCard) groupCard.style.display = activeMethod === 'producer' ? 'none' : '';
+        return;
     }
+    const hideActiveEnv = activeMethod === 'producer' || activeMethod === 'consumer';
+    if (envCard) envCard.style.display = hideActiveEnv ? 'none' : '';
+    if (groupCard) groupCard.style.display = activeMethod === 'producer' ? 'none' : '';
+}
+
+function applyActiveMethodLayout() {
+    const hideTopicsChrome = isTopicsBrowserChromeHidden();
+    applyRibbonAndOptionsChrome(hideTopicsChrome);
+    applyProducerConsumerOptionSections();
+    applySummaryEnvGroupCards(hideTopicsChrome);
 }
 
 function updateSummaryCards() {
@@ -422,11 +451,14 @@ function updateSummaryCards() {
         activeEnvName.textContent = env.label || activeEnv;
     }
 
-    const selectedTopicLabel = activeMethod === 'consumer'
-        ? consumerTopic
-        : (activeMethod === 'consumerLag'
-            ? lagTopic
-            : (activeMethod === 'clusterInfo' ? '' : producerTopic));
+    let selectedTopicLabel = '';
+    if (activeMethod === 'consumer') {
+        selectedTopicLabel = consumerTopic;
+    } else if (activeMethod === 'consumerLag') {
+        selectedTopicLabel = lagTopic;
+    } else if (activeMethod !== 'clusterInfo') {
+        selectedTopicLabel = producerTopic;
+    }
     activeTopicName.textContent = selectedTopicLabel || '-';
     if (activeGroupName) activeGroupName.textContent = consumerGroup || '-';
 }
@@ -521,7 +553,8 @@ function validatePayload(format, text) {
         try {
             JSON.parse(raw);
             return true;
-        } catch (_) {
+        } catch (err) {
+            logDebug('validatePayload json', err);
             return false;
         }
     }
@@ -612,7 +645,9 @@ function applyProducerFormat(format, { skipStorage } = {}) {
     if (!skipStorage) {
         try {
             window.localStorage.setItem(PRODUCER_FORMAT_STORAGE_KEY, producerFormat);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage producer format', err);
+        }
     }
 }
 
@@ -626,7 +661,9 @@ function applyConsumerFormat(format, { skipStorage } = {}) {
     if (!skipStorage) {
         try {
             window.localStorage.setItem(CONSUMER_FORMAT_STORAGE_KEY, consumerFormat);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage consumer format', err);
+        }
     }
 }
 
@@ -700,7 +737,8 @@ function getFilteredConsumedMessages() {
             try {
                 const re = new RegExp(term, 'i');
                 filtered = consumedMessages.filter((m) => re.test(m.value) || re.test(String(m.key || '')));
-            } catch (_) {
+            } catch (err) {
+                logDebug('consumer filter regex', err);
                 filtered = consumedMessages;
             }
         } else {
@@ -719,7 +757,8 @@ function formatPayloadForViewer(raw, formatId) {
     if (id === 'text') return text;
     try {
         return formatPayload(id, text);
-    } catch (_) {
+    } catch (err) {
+        logDebug('formatPayloadForViewer', err);
         return text;
     }
 }
@@ -739,20 +778,24 @@ function openConsumerMessagePayloadWindow(msg) {
             formatId: fmtId,
         }));
     } catch (err) {
+        logDebug('sessionStorage set viewer payload', err);
         showAlert('View payload', 'Could not store payload for the viewer (too large or storage unavailable).');
         return;
     }
     let url;
     try {
         url = new URL('payload-viewer.html', window.location.href).href;
-    } catch (_) {
+    } catch (err) {
+        logDebug('payload-viewer URL', err);
         url = 'payload-viewer.html';
     }
     const w = window.open(url, '_blank', 'width=920,height=720,scrollbars=yes');
     if (!w) {
         try {
             sessionStorage.removeItem(PAYLOAD_VIEWER_STORAGE_KEY);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('sessionStorage remove viewer key', err);
+        }
         showAlert('View payload', 'Could not open a new window (popup blocker or OS restriction).');
     }
 }
@@ -807,7 +850,9 @@ function applyConsumerSurfaceVisibility() {
         if (consumer) {
             try {
                 consumer.refresh();
-            } catch (_) { /* ignore */ }
+            } catch (err) {
+                logDebug('consumer.refresh', err);
+            }
         }
     }
 }
@@ -850,9 +895,12 @@ function renderConsumerTable(filtered) {
         const valDisp = trunc(valStr, valuePreviewMax);
         const keyTitle = keyDisp.title ? ` title="${keyDisp.title}"` : '';
         const valueHasContent = valStr.length > 0;
-        const valueTitleAttr = valDisp.title
-            ? ` title="${valDisp.title}"`
-            : (valueHasContent ? ' title="Open full payload in new window (click or Enter)"' : '');
+        let valueTitleAttr = '';
+        if (valDisp.title) {
+            valueTitleAttr = ` title="${valDisp.title}"`;
+        } else if (valueHasContent) {
+            valueTitleAttr = ' title="Open full payload in new window (click or Enter)"';
+        }
         const valueCellAttrs = valueHasContent
             ? ` class="consumer-msg-value-cell consumer-msg-value-cell--openable" tabindex="0" role="button" aria-label="Open full payload in new window"${valueTitleAttr}`
             : ' class="consumer-msg-value-cell"';
@@ -887,7 +935,9 @@ function formatConsumedEntry(msg) {
     if (consumerFormat === 'json') {
         try {
             body = JSON.stringify(JSON.parse(msg.value), null, 2);
-        } catch (_) { /* keep as-is */ }
+        } catch (err) {
+            logDebug('format consumed json', err);
+        }
     }
     const metaLine = `partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
         (msg.key ? ` key=${msg.key}` : '');
@@ -1031,9 +1081,12 @@ async function handleExportConsumed() {
     const format = await showExportFormatDialog();
     if (!format || !['json', 'jsonl', 'csv'].includes(format)) return;
 
-    const defaultPath = format === 'json' ? 'consumed-messages.json'
-        : format === 'jsonl' ? 'consumed-messages.jsonl'
-            : 'consumed-messages.csv';
+    let defaultPath = 'consumed-messages.csv';
+    if (format === 'json') {
+        defaultPath = 'consumed-messages.json';
+    } else if (format === 'jsonl') {
+        defaultPath = 'consumed-messages.jsonl';
+    }
     const result = await ipcRenderer.invoke('save-consumed-export', {
         defaultPath,
         filters: [
@@ -1265,8 +1318,8 @@ async function stopConsumingAndResetUI() {
     resetConsumerIdleWatchdog();
     try {
         await stopConsuming();
-    } catch (_) {
-        /* ignore */
+    } catch (err) {
+        logDebug('stopConsuming', err);
     }
     resetConsumeUIState();
 }
@@ -1527,6 +1580,22 @@ async function handleLagDelete(scope, groupIds) {
     }
 }
 
+function showBulkOffsetResetResultAlerts(details, topic) {
+    const partial = details.failureCount > 0 && details.successCount > 0;
+    const failedOnly = details.failureCount > 0 && details.successCount === 0;
+    if (!partial && !failedOnly) {
+        showAlert('Offset reset', `Reset offsets to latest for ${details.successCount} group(s) on "${topic}".`);
+        return 'success';
+    }
+    if (partial) {
+        showAlert('Offset reset (partial)', `Reset succeeded for ${details.successCount} group(s), failed for ${details.failureCount}.`);
+        return 'partial';
+    }
+    const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
+    showAlert('Offset reset failed', firstErr);
+    return 'failed';
+}
+
 async function handleLagReset(scope, groupIds) {
     const topic = lagTopic;
     if (!topic) {
@@ -1544,7 +1613,8 @@ async function handleLagReset(scope, groupIds) {
     const osUsername = (() => {
         try {
             return os.userInfo().username || process.env.USERNAME || process.env.USER || 'unknown';
-        } catch (_) {
+        } catch (err) {
+            logDebug('os.userInfo', err);
             return process.env.USERNAME || process.env.USER || 'unknown';
         }
     })();
@@ -1559,16 +1629,7 @@ async function handleLagReset(scope, groupIds) {
 
         if (scope === 'bulk') {
             details = await resetConsumerGroupsOffsetsToLatest(kafka, { topic, groupIds: targets });
-            if (details.failureCount > 0 && details.successCount > 0) outcome = 'partial';
-            if (details.failureCount > 0 && details.successCount === 0) outcome = 'failed';
-            if (outcome === 'success') {
-                showAlert('Offset reset', `Reset offsets to latest for ${details.successCount} group(s) on "${topic}".`);
-            } else if (outcome === 'partial') {
-                showAlert('Offset reset (partial)', `Reset succeeded for ${details.successCount} group(s), failed for ${details.failureCount}.`);
-            } else {
-                const firstErr = (details.results.find((r) => !r.ok) || {}).error || 'Unknown error';
-                showAlert('Offset reset failed', firstErr);
-            }
+            outcome = showBulkOffsetResetResultAlerts(details, topic);
         } else {
             details = await resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId: targets[0] });
             showAlert('Offset reset', `Reset offsets to latest for "${targets[0]}" on "${topic}".`);
@@ -1625,6 +1686,81 @@ function populateLagTopicSelect() {
     };
 }
 
+function lagCommittedAndLagCells(pr) {
+    const committedCell = pr.committedDisplay === null ? '—' : escapeHtml(pr.committedDisplay);
+    const lagCell = pr.lag === null ? '—' : escapeHtml(String(pr.lag));
+    return { committedCell, lagCell };
+}
+
+function lagClientsCells(clientsStr, clientsShort) {
+    const clientsTitle = escapeHtml(clientsStr);
+    const clientsBody = clientsShort ? escapeHtml(clientsShort) : '—';
+    return { clientsTitle, clientsBody };
+}
+
+function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
+    const tr = document.createElement('tr');
+    const { committedCell, lagCell } = lagCommittedAndLagCells(pr);
+    const { clientsTitle, clientsBody } = lagClientsCells(clientsStr, clientsShort);
+    tr.innerHTML = `
+                <td class="topic-cell">${escapeHtml(g.groupId)}</td>
+                <td>${escapeHtml(String(g.state))}</td>
+                <td>${g.memberCount}</td>
+                <td class="lag-clients-cell" title="${clientsTitle}">${clientsBody}</td>
+                <td>${pr.partition}</td>
+                <td>${committedCell}</td>
+                <td>${escapeHtml(String(pr.logEnd))}</td>
+                <td>${lagCell}</td>
+                <td class="lag-action-cell lag-col-actions">
+                    <div class="lag-action-buttons">
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
+                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
+                    </div>
+                </td>
+            `;
+    body.appendChild(tr);
+}
+
+function appendLagOverviewRows(body, data) {
+    for (const g of data.groups) {
+        const clients = (g.members || []).map((m) => m.clientId || m.memberId).filter(Boolean);
+        const clientsStr = clients.join(', ');
+        const clientsShort = clientsStr.length > 48 ? `${clientsStr.slice(0, 45)}…` : clientsStr;
+        for (const pr of g.partitions) {
+            appendLagPartitionRow(body, g, pr, clientsStr, clientsShort);
+        }
+    }
+}
+
+function bindLagOverviewRowActions(body) {
+    body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-reset-group') || '');
+            } catch (err) {
+                logDebug('decode lag-reset-group', err);
+                return;
+            }
+            if (!groupId) return;
+            handleLagReset('single', [groupId]);
+        });
+    });
+    body.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-delete-group') || '');
+            } catch (err) {
+                logDebug('decode lag-delete-group', err);
+                return;
+            }
+            if (!groupId) return;
+            handleLagDelete('single', [groupId]);
+        });
+    });
+}
+
 function renderLagOverviewResult(data) {
     const body = document.getElementById('lagTableBody');
     const empty = document.getElementById('lagEmptyState');
@@ -1644,60 +1780,8 @@ function renderLagOverviewResult(data) {
 
     empty.style.display = 'none';
     body.innerHTML = '';
-
-    for (const g of data.groups) {
-        const clients = (g.members || []).map((m) => m.clientId || m.memberId).filter(Boolean);
-        const clientsStr = clients.join(', ');
-        const clientsShort = clientsStr.length > 48 ? `${clientsStr.slice(0, 45)}…` : clientsStr;
-        for (const pr of g.partitions) {
-            const tr = document.createElement('tr');
-            const committedCell = pr.committedDisplay === null ? '—' : escapeHtml(pr.committedDisplay);
-            const lagCell = pr.lag === null ? '—' : escapeHtml(String(pr.lag));
-            const clientsTitle = escapeHtml(clientsStr);
-            const clientsBody = clientsShort ? escapeHtml(clientsShort) : '—';
-            tr.innerHTML = `
-                <td class="topic-cell">${escapeHtml(g.groupId)}</td>
-                <td>${escapeHtml(String(g.state))}</td>
-                <td>${g.memberCount}</td>
-                <td class="lag-clients-cell" title="${clientsTitle}">${clientsBody}</td>
-                <td>${pr.partition}</td>
-                <td>${committedCell}</td>
-                <td>${escapeHtml(String(pr.logEnd))}</td>
-                <td>${lagCell}</td>
-                <td class="lag-action-cell lag-col-actions">
-                    <div class="lag-action-buttons">
-                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
-                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
-                    </div>
-                </td>
-            `;
-            body.appendChild(tr);
-        }
-    }
-    body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            let groupId = '';
-            try {
-                groupId = decodeURIComponent(btn.getAttribute('data-lag-reset-group') || '');
-            } catch (_) {
-                return;
-            }
-            if (!groupId) return;
-            handleLagReset('single', [groupId]);
-        });
-    });
-    body.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            let groupId = '';
-            try {
-                groupId = decodeURIComponent(btn.getAttribute('data-lag-delete-group') || '');
-            } catch (_) {
-                return;
-            }
-            if (!groupId) return;
-            handleLagDelete('single', [groupId]);
-        });
-    });
+    appendLagOverviewRows(body, data);
+    bindLagOverviewRowActions(body);
     setLagResetControlsState();
 }
 
@@ -1806,9 +1890,12 @@ function renderClusterMetadata(data) {
 
     const controller = data.controllerId;
     const controllerBroker = (data.brokers || []).find((b) => b.nodeId === controller);
-    const controllerStr = controllerBroker
-        ? `${controllerBroker.host}:${controllerBroker.port} (node ${controller})`
-        : (controller == null ? '—' : `node ${controller}`);
+    let controllerStr = '—';
+    if (controllerBroker) {
+        controllerStr = `${controllerBroker.host}:${controllerBroker.port} (node ${controller})`;
+    } else if (controller != null) {
+        controllerStr = `node ${controller}`;
+    }
 
     const groupLabel = data.groupCount === null ? '—' : String(data.groupCount);
 
@@ -1924,7 +2011,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         let storedProducerFormat = null;
         try {
             storedProducerFormat = window.localStorage.getItem(PRODUCER_FORMAT_STORAGE_KEY);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage producer format read', err);
+        }
         applyProducerFormat(PAYLOAD_FORMATS[storedProducerFormat] ? storedProducerFormat : DEFAULT_FORMAT, { skipStorage: true });
 
         Object.values(envConfig).forEach((env) => {
@@ -2049,7 +2138,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         let storedConsumerFormat = null;
         try {
             storedConsumerFormat = window.localStorage.getItem(CONSUMER_FORMAT_STORAGE_KEY);
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage consumer format read', err);
+        }
         applyConsumerFormat(PAYLOAD_FORMATS[storedConsumerFormat] ? storedConsumerFormat : DEFAULT_FORMAT, { skipStorage: true });
 
         wireTemplateControls();
@@ -2426,6 +2517,41 @@ const onTopicChange = (topic, methodId) => {
     hideLoading();
 };
 
+function loadLazyMethodTabData(tabId) {
+    if (tabId === 'topicsBrowser' && topicsCache.length === 0) {
+        loadTopicsBrowser(true);
+    }
+    if (tabId === 'consumerLag') {
+        populateLagTopicSelect();
+    }
+    if (tabId === 'clusterInfo') {
+        loadClusterOverview();
+    }
+}
+
+function syncTopicSelectValueForTab(tab) {
+    const topicSelect = document.getElementById('topicSelect');
+    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag' && tab.id !== 'clusterInfo') {
+        topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
+    }
+}
+
+function syncConsumerChromeForActiveTab(tab) {
+    if (tab.id !== 'consumer') return;
+    consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
+    const groupInput = document.getElementById('consumerGroupInput');
+    if (groupInput) groupInput.value = consumerGroup;
+    if (consumerTopic) {
+        refreshPartitions(consumerTopic);
+    } else {
+        refreshPartitions('');
+    }
+    const stopConsumeButton = document.getElementById('consumeButton');
+    if (!consumeStarted && stopConsumeButton) {
+        stopConsumeButton.disabled = consumerTopic === '';
+    }
+}
+
 const onMethodTabClick = (tab) => {
     activeMethod = tab.id;
     if (activeEnv) {
@@ -2438,39 +2564,11 @@ const onMethodTabClick = (tab) => {
         document.getElementById(m.containerId).style.display = m.id === tab.id ? 'flex' : 'none';
     });
 
-    if (tab.id === 'topicsBrowser' && topicsCache.length === 0) {
-        loadTopicsBrowser(true);
-    }
-
-    if (tab.id === 'consumerLag') {
-        populateLagTopicSelect();
-    }
-
-    if (tab.id === 'clusterInfo') {
-        loadClusterOverview();
-    }
-
+    loadLazyMethodTabData(tab.id);
     applyActiveMethodLayout();
-
-    const topicSelect = document.getElementById('topicSelect');
-    if (topicSelect && tab.id !== 'topicsBrowser' && tab.id !== 'consumerLag' && tab.id !== 'clusterInfo') {
-        topicSelect.value = tab.id === 'consumer' ? consumerTopic : producerTopic;
-    }
-
-    if (tab.id === 'consumer') {
-        consumerGroup = consumerTopic ? getGroupForTopic(activeEnv, consumerTopic) : DEFAULT_GROUP;
-        const groupInput = document.getElementById('consumerGroupInput');
-        if (groupInput) groupInput.value = consumerGroup;
-        if (consumerTopic) {
-            refreshPartitions(consumerTopic);
-        } else {
-            refreshPartitions('');
-        }
-        const stopConsumeButton = document.getElementById('consumeButton');
-        if (!consumeStarted && stopConsumeButton) {
-            stopConsumeButton.disabled = consumerTopic === '';
-        }
-    } else if (tab.id === 'producer') {
+    syncTopicSelectValueForTab(tab);
+    syncConsumerChromeForActiveTab(tab);
+    if (tab.id === 'producer') {
         reloadProduceButton();
     }
 
@@ -2576,7 +2674,9 @@ function initializeOptionsResizer() {
     let stored = null;
     try {
         stored = window.localStorage.getItem(OPTIONS_WIDTH_STORAGE_KEY);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage options width read', err);
+    }
     applyOptionsWidth(stored != null ? stored : OPTIONS_WIDTH_DEFAULT);
 
     let dragStartX = 0;
@@ -2599,7 +2699,9 @@ function initializeOptionsResizer() {
         const finalWidth = clampOptionsWidth(optionsPanel.getBoundingClientRect().width);
         try {
             window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(finalWidth));
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage options width write', err);
+        }
     }
 
     resizer.addEventListener('mousedown', (event) => {
@@ -2617,7 +2719,9 @@ function initializeOptionsResizer() {
         applyOptionsWidth(OPTIONS_WIDTH_DEFAULT);
         try {
             window.localStorage.setItem(OPTIONS_WIDTH_STORAGE_KEY, String(OPTIONS_WIDTH_DEFAULT));
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage options width default', err);
+        }
     });
 }
 
@@ -2640,7 +2744,9 @@ function initializeSidebarCollapse() {
     let stored = null;
     try {
         stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage sidebar read', err);
+    }
     applySidebarCollapsedState(stored === '1');
 
     toggle.addEventListener('click', () => {
@@ -2650,7 +2756,9 @@ function initializeSidebarCollapse() {
         applySidebarCollapsedState(next);
         try {
             window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('localStorage sidebar write', err);
+        }
     });
 }
 

@@ -8,6 +8,12 @@ const { probeClusterConnection, brokerListFromInput } = require('./backend/kafka
 const THEME_STORAGE_KEY = 'kss-theme';
 const ENV_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
+function logDebug(context, err) {
+    if (typeof console !== 'undefined' && console.debug) {
+        console.debug(`[kss-setup] ${context}`, err);
+    }
+}
+
 const schemaPath = path.join(__dirname, 'schema.json');
 const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 const ajv = new Ajv();
@@ -26,7 +32,9 @@ function resolveInitialTheme() {
     try {
         const ls = window.localStorage.getItem(THEME_STORAGE_KEY);
         if (ls === 'light' || ls === 'dark') return ls;
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage theme read', err);
+    }
     return 'dark';
 }
 
@@ -35,7 +43,9 @@ function applyTheme(theme) {
     document.body.setAttribute('data-theme', t);
     try {
         window.localStorage.setItem(THEME_STORAGE_KEY, t);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+        logDebug('localStorage theme write', err);
+    }
 }
 
 function escapeHtml(str) {
@@ -102,7 +112,8 @@ function syncJsonTextarea() {
     if (!ta) return;
     try {
         ta.value = JSON.stringify(buildConfigObject(), null, 4);
-    } catch (_) {
+    } catch (err) {
+        logDebug('syncJsonTextarea', err);
         ta.value = '{}';
     }
 }
@@ -193,6 +204,114 @@ function renderEnvList() {
     });
 }
 
+function buildProbeHtmlForSetup(env) {
+    if (probeInFlight) {
+        return '<span class="probe-status">Testing connection…</span>';
+    }
+    const probe = env.probeResult;
+    if (probe && probe.ok) {
+        return `<span class="probe-status is-ok">Connected — cluster <code>${escapeHtml(probe.clusterId || '—')}</code>, ${probe.brokerCount} broker(s), ${probe.topicNames.length} user topics.</span>`;
+    }
+    if (probe && !probe.ok) {
+        return `<span class="probe-status is-err">${escapeHtml(probe.error)}</span>`;
+    }
+    return '<span class="probe-status">Run <strong>Test connection</strong> to verify brokers and load topic names.</span>';
+}
+
+function buildClusterTopicSectionHtml(env, available) {
+    const probe = env.probeResult;
+    const clusterOk = probe && probe.ok;
+    if (!clusterOk) {
+        const failNote = (probe && !probe.ok)
+            ? '<p>Fix the broker list if needed, then run <strong>Test connection</strong> again. Loading topics does not change your cluster.</p>'
+            : '<p>Run <strong>Test connection</strong> above (or below) to load topic names from the broker. This only reads metadata; it does not create or delete topics.</p>';
+        return `
+            <div class="topic-scroll topic-scroll--placeholder" id="clusterTopicScroll">
+                <div class="topic-placeholder-inner">
+                    ${failNote}
+                    <button type="button" class="btn btn-secondary" id="testConnBtnPlaceholder"${probeInFlight ? ' disabled' : ''}>Test connection</button>
+                </div>
+            </div>
+        `;
+    }
+    if (!available.length) {
+        return `
+                <input type="search" class="topic-search" id="topicFilterInput" placeholder="Search topics…" value="${escapeHtml(env.topicFilter)}" />
+                <div class="topic-scroll" id="clusterTopicScroll"><div class="topic-row-muted">No matching topics, or all visible topics are already saved.</div></div>
+            `;
+    }
+    const availableRows = available.slice(0, 400).map((name) => `
+                <div class="topic-row">
+                    <span class="topic-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                    <button type="button" class="btn btn-secondary btn-small" data-add-topic="${encodeURIComponent(name)}">Add</button>
+                </div>
+            `).join('');
+    const capNote = available.length > 400
+        ? '<div class="topic-row-muted">Showing first 400 matches. Refine search.</div>'
+        : '';
+    return `
+                <input type="search" class="topic-search" id="topicFilterInput" placeholder="Search topics…" value="${escapeHtml(env.topicFilter)}" />
+                <div class="topic-scroll" id="clusterTopicScroll">${availableRows}${capNote}</div>
+            `;
+}
+
+function buildSavedTopicsHtml(env) {
+    if (!env.topicList.length) {
+        return '<div class="topic-row-muted">No topics saved yet. Add from the list on the left.</div>';
+    }
+    return env.topicList.map((name) => `
+            <span class="chip">
+                <span class="chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <button type="button" class="chip-remove" data-remove-topic="${encodeURIComponent(name)}" aria-label="Remove">&times;</button>
+            </span>
+        `).join('');
+}
+
+function bindEnvTopicButtons(panel, env) {
+    panel.querySelectorAll('[data-add-topic]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let name = '';
+            try {
+                name = decodeURIComponent(btn.getAttribute('data-add-topic') || '');
+            } catch (err) {
+                logDebug('decodeURIComponent add-topic', err);
+                return;
+            }
+            if (!name || env.topicList.includes(name)) return;
+            env.topicList.push(name);
+            env.topicList.sort((a, b) => a.localeCompare(b));
+            syncJsonTextarea();
+            renderEnvPanel();
+        });
+    });
+    panel.querySelectorAll('[data-remove-topic]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let name = '';
+            try {
+                name = decodeURIComponent(btn.getAttribute('data-remove-topic') || '');
+            } catch (err) {
+                logDebug('decodeURIComponent remove-topic', err);
+                return;
+            }
+            env.topicList = env.topicList.filter((t) => t !== name);
+            syncJsonTextarea();
+            renderEnvPanel();
+        });
+    });
+}
+
+function restoreEnvPanelFocus(focusId) {
+    if (!focusId) return;
+    const el = document.getElementById(focusId);
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+        el.focus();
+        const len = el.value.length;
+        if (typeof el.setSelectionRange === 'function') {
+            el.setSelectionRange(len, len);
+        }
+    }
+}
+
 function renderEnvPanel() {
     const panel = document.getElementById('envPanel');
     const env = getActive();
@@ -212,65 +331,12 @@ function renderEnvPanel() {
     );
     const brokersHave = brokerListFromInput(env.brokersText).length > 0;
 
-    let probeHtml = '';
-    if (probeInFlight) {
-        probeHtml = '<span class="probe-status">Testing connection…</span>';
-    } else if (probe && probe.ok) {
-        probeHtml = `<span class="probe-status is-ok">Connected — cluster <code>${escapeHtml(probe.clusterId || '—')}</code>, ${probe.brokerCount} broker(s), ${probe.topicNames.length} user topics.</span>`;
-    } else if (probe && !probe.ok) {
-        probeHtml = `<span class="probe-status is-err">${escapeHtml(probe.error)}</span>`;
-    } else {
-        probeHtml = '<span class="probe-status">Run <strong>Test connection</strong> to verify brokers and load topic names.</span>';
-    }
-
+    const probeHtml = buildProbeHtmlForSetup(env);
     const probeCtaHint = (brokersHave && !clusterOk && !probeInFlight)
         ? '<p class="probe-cta-hint">Test connection is required to load topic names from the cluster for this environment.</p>'
         : '';
-
-    let clusterTopicBody = '';
-    if (clusterOk) {
-        if (!available.length) {
-            clusterTopicBody = `
-                <input type="search" class="topic-search" id="topicFilterInput" placeholder="Search topics…" value="${escapeHtml(env.topicFilter)}" />
-                <div class="topic-scroll" id="clusterTopicScroll"><div class="topic-row-muted">No matching topics, or all visible topics are already saved.</div></div>
-            `;
-        } else {
-            const availableRows = available.slice(0, 400).map((name) => `
-                <div class="topic-row">
-                    <span class="topic-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-                    <button type="button" class="btn btn-secondary btn-small" data-add-topic="${encodeURIComponent(name)}">Add</button>
-                </div>
-            `).join('');
-            const capNote = available.length > 400
-                ? '<div class="topic-row-muted">Showing first 400 matches. Refine search.</div>'
-                : '';
-            clusterTopicBody = `
-                <input type="search" class="topic-search" id="topicFilterInput" placeholder="Search topics…" value="${escapeHtml(env.topicFilter)}" />
-                <div class="topic-scroll" id="clusterTopicScroll">${availableRows}${capNote}</div>
-            `;
-        }
-    } else {
-        const failNote = (probe && !probe.ok)
-            ? '<p>Fix the broker list if needed, then run <strong>Test connection</strong> again. Loading topics does not change your cluster.</p>'
-            : '<p>Run <strong>Test connection</strong> above (or below) to load topic names from the broker. This only reads metadata; it does not create or delete topics.</p>';
-        clusterTopicBody = `
-            <div class="topic-scroll topic-scroll--placeholder" id="clusterTopicScroll">
-                <div class="topic-placeholder-inner">
-                    ${failNote}
-                    <button type="button" class="btn btn-secondary" id="testConnBtnPlaceholder"${probeInFlight ? ' disabled' : ''}>Test connection</button>
-                </div>
-            </div>
-        `;
-    }
-
-    const savedChips = env.topicList.length
-        ? env.topicList.map((name) => `
-            <span class="chip">
-                <span class="chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-                <button type="button" class="chip-remove" data-remove-topic="${encodeURIComponent(name)}" aria-label="Remove">&times;</button>
-            </span>
-        `).join('')
-        : '<div class="topic-row-muted">No topics saved yet. Add from the list on the left.</div>';
+    const clusterTopicBody = buildClusterTopicSectionHtml(env, available);
+    const savedChips = buildSavedTopicsHtml(env);
 
     panel.innerHTML = `
         <div class="env-panel-inner">
@@ -343,34 +409,7 @@ function renderEnvPanel() {
         });
     }
 
-    panel.querySelectorAll('[data-add-topic]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            let name = '';
-            try {
-                name = decodeURIComponent(btn.getAttribute('data-add-topic') || '');
-            } catch (_) {
-                return;
-            }
-            if (!name || env.topicList.includes(name)) return;
-            env.topicList.push(name);
-            env.topicList.sort((a, b) => a.localeCompare(b));
-            syncJsonTextarea();
-            renderEnvPanel();
-        });
-    });
-    panel.querySelectorAll('[data-remove-topic]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            let name = '';
-            try {
-                name = decodeURIComponent(btn.getAttribute('data-remove-topic') || '');
-            } catch (_) {
-                return;
-            }
-            env.topicList = env.topicList.filter((t) => t !== name);
-            syncJsonTextarea();
-            renderEnvPanel();
-        });
-    });
+    bindEnvTopicButtons(panel, env);
 
     async function handleTestConnection() {
         if (probeInFlight) return;
@@ -392,16 +431,7 @@ function renderEnvPanel() {
         testPlaceholder.addEventListener('click', handleTestConnection);
     }
 
-    if (focusId) {
-        const el = document.getElementById(focusId);
-        if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
-            el.focus();
-            const len = el.value.length;
-            if (typeof el.setSelectionRange === 'function') {
-                el.setSelectionRange(len, len);
-            }
-        }
-    }
+    restoreEnvPanelFocus(focusId);
 }
 
 function renderAll() {

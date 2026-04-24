@@ -3,6 +3,20 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+function logDebug(context, err) {
+    if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+        console.debug(`[kss-kafka] ${context}`, err);
+    }
+}
+
+async function safeAdminDisconnect(admin) {
+    try {
+        await admin.disconnect();
+    } catch (err) {
+        logDebug('admin.disconnect', err);
+    }
+}
+
 let consumer;
 let consumerStopping = false;
 
@@ -54,7 +68,7 @@ async function probeClusterConnection(brokersInput) {
     } catch (err) {
         return { ok: false, error: err.message || String(err) };
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 }
 
@@ -88,6 +102,7 @@ async function getTopicsAndPartitions(kafka) {
             try {
                 offsetsMap[t] = await admin.fetchTopicOffsets(t);
             } catch (err) {
+                logDebug(`fetchTopicOffsets:${t}`, err);
                 offsetsMap[t] = [];
             }
         }));
@@ -120,7 +135,7 @@ async function getTopicsAndPartitions(kafka) {
             })
             .sort((a, b) => a.name.localeCompare(b.name));
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 }
 
@@ -130,7 +145,7 @@ async function getTopicOffsets(kafka, topic) {
         await admin.connect();
         return await admin.fetchTopicOffsets(topic);
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 }
 
@@ -165,6 +180,20 @@ function parseConfiguredBroker(str) {
     };
 }
 
+function partitionHealthFlags(p) {
+    const replicas = Array.isArray(p.replicas) ? p.replicas : [];
+    const isr = Array.isArray(p.isr) ? p.isr : [];
+    const errCode = Number(p.partitionErrorCode || 0);
+    const leaderNum = Number(p.leader);
+    const noLeader = p.leader === null || p.leader === undefined
+        || !Number.isFinite(leaderNum) || leaderNum < 0;
+    return {
+        hasMetadataError: errCode !== 0,
+        noLeader,
+        underReplicated: replicas.length > 0 && isr.length < replicas.length,
+    };
+}
+
 /**
  * Per-topic and aggregate signals from Metadata (ISR vs replicas, leaders, error codes).
  */
@@ -185,21 +214,16 @@ async function buildTopicHealthSummary(admin) {
 
         for (const p of parts) {
             partitionCount += 1;
-            const replicas = Array.isArray(p.replicas) ? p.replicas : [];
-            const isr = Array.isArray(p.isr) ? p.isr : [];
-            const errCode = Number(p.partitionErrorCode || 0);
-            if (errCode !== 0) {
+            const flags = partitionHealthFlags(p);
+            if (flags.hasMetadataError) {
                 erroredPartitions += 1;
                 topicErr += 1;
             }
-            const leaderNum = Number(p.leader);
-            const noLeader = p.leader === null || p.leader === undefined
-                || !Number.isFinite(leaderNum) || leaderNum < 0;
-            if (noLeader) {
+            if (flags.noLeader) {
                 offlineOrNoLeaderPartitions += 1;
                 topicOffline += 1;
             }
-            if (replicas.length > 0 && isr.length < replicas.length) {
+            if (flags.underReplicated) {
                 underReplicatedPartitions += 1;
                 topicUrp += 1;
             }
@@ -259,7 +283,8 @@ async function getClusterMetadata(kafka, configuredBrokers) {
         try {
             const lg = await admin.listGroups();
             groupCount = new Set((lg.groups || []).map((g) => g.groupId)).size;
-        } catch (_) {
+        } catch (err) {
+            logDebug('listGroups', err);
             groupCount = null;
         }
 
@@ -289,7 +314,7 @@ async function getClusterMetadata(kafka, configuredBrokers) {
             topicHealth,
         };
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 }
 
@@ -378,8 +403,8 @@ async function getConsumerLagOverview(kafka, topicName) {
                 for (const g of descGroups || []) {
                     describeMap.set(g.groupId, g);
                 }
-            } catch (_) {
-                /* describe is best-effort */
+            } catch (err) {
+                logDebug('describeGroups', err);
             }
         }
 
@@ -414,7 +439,7 @@ async function getConsumerLagOverview(kafka, topicName) {
             groups,
         };
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 }
 
@@ -460,7 +485,7 @@ async function resetConsumerGroupOffsetsToLatest(kafka, options) {
             partitions,
         };
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 }
 
@@ -505,7 +530,7 @@ async function resetConsumerGroupsOffsetsToLatest(kafka, options) {
             }
         }
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 
     const successCount = results.filter((r) => r.ok).length;
@@ -581,7 +606,7 @@ async function deleteConsumerGroups(kafka, options) {
             throw err;
         }
     } finally {
-        try { await admin.disconnect(); } catch (_) { /* ignore */ }
+        await safeAdminDisconnect(admin);
     }
 }
 
@@ -630,7 +655,11 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
                 await stopConsuming();
             } finally {
                 if (typeof onDone === 'function') {
-                    try { onDone(); } catch (_) { /* ignore */ }
+                    try {
+                        onDone();
+                    } catch (err) {
+                        logDebug('consume onDone', err);
+                    }
                 }
             }
         });
@@ -660,7 +689,9 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
                         value: message.value ? message.value.toString() : '',
                         headers: message.headers || {},
                     });
-                } catch (_) { /* ignore */ }
+                } catch (err) {
+                    logDebug('consume onMessage', err);
+                }
 
                 if (limit !== null && received >= limit) {
                     await stopFromInside();
@@ -696,7 +727,9 @@ async function stopConsuming() {
         consumerStopping = true;
         try {
             await consumer.disconnect();
-        } catch (_) { /* ignore */ }
+        } catch (err) {
+            logDebug('consumer.disconnect', err);
+        }
         consumer = null;
         consumerStopping = false;
     }

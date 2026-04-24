@@ -4,6 +4,8 @@
   "description": "A light weight bare minimum Kafka UI",
   "main": "main.js",
   "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "start": "electronmon .",
     "test": "echo \"Error: no test specified\" && exit 1",
     "package": "electron-forge package",
@@ -29,7 +31,10 @@
     "@electron-forge/plugin-fuses": "^7.11.1",
     "@rabbitholesyndrome/electron-forge-maker-portable": "0.2.0",
     "electron": "^41.3.0",
-    "electronmon": "^2.0.3"
+    "electronmon": "^2.0.3",
+    "eslint": "^9.39.4",
+    "eslint-plugin-sonarjs": "^4.0.3",
+    "globals": "^17.5.0"
   },
   "overrides": {
     "app-builder-lib": "26.8.1",
