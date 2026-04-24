@@ -489,8 +489,8 @@ body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
 }
 
 .theme-icon.moon {
-    color: #60a5fa;
-    text-shadow: 0 0 8px rgba(96, 165, 250, 0.28);
+    color: var(--color-text-subtle);
+    text-shadow: 0 0 8px color-mix(in srgb, var(--color-text-subtle) 35%, transparent);
 }
 
 .theme-switch input {
@@ -527,7 +527,7 @@ body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
 }
 
 .theme-switch input:checked + .theme-switch-inner .theme-slider {
-    background: linear-gradient(135deg, var(--color-accent), #06b6d4);
+    background: linear-gradient(135deg, var(--color-accent), var(--color-accent-strong));
     border-color: var(--color-accent);
 }
 
@@ -569,7 +569,7 @@ body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
     position: absolute;
     inset: 0 auto 0 0;
     width: 3px;
-    background: linear-gradient(180deg, var(--color-accent), #06b6d4);
+    background: linear-gradient(180deg, var(--color-accent), var(--color-accent-strong));
     opacity: 0.85;
 }
 
@@ -635,6 +635,21 @@ body[data-app-mode="basic"] #consumerLagContainer .lag-toolbar-advanced {
     color: var(--color-accent);
     border-color: var(--color-accent);
     box-shadow: var(--shadow-sm);
+}
+
+body[data-theme="dark"] #tabs .tab.active {
+    color: var(--color-heading);
+    font-weight: 700;
+    background: color-mix(in srgb, var(--color-bg-muted) 64%, #ffffff 12%, var(--color-accent) 24%);
+    border-color: color-mix(in srgb, #8a7bff 42%, var(--color-border-strong));
+    transform: translateY(1px);
+    box-shadow:
+        inset 0 2px 4px rgba(0, 0, 0, 0.45),
+        inset 0 0 0 1px color-mix(in srgb, #ffffff 20%, transparent),
+        inset 0 -1px 0 color-mix(in srgb, #ffffff 16%, transparent),
+        0 0 0 1px rgba(120, 103, 255, 0.45),
+        0 0 0 3px rgba(86, 153, 255, 0.16),
+        0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .tab-icon {
@@ -846,8 +861,8 @@ body.options-resizing * {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--color-accent), #06b6d4);
-    box-shadow: 0 0 6px rgba(79, 70, 229, 0.55);
+    background: linear-gradient(135deg, var(--color-accent), var(--color-accent-strong));
+    box-shadow: 0 0 6px color-mix(in srgb, var(--color-accent) 70%, transparent);
 }
 
 #payload,
