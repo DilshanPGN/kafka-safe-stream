@@ -40,6 +40,9 @@
     "app-builder-lib": "26.8.1",
     "tar": "7.5.13",
     "minimatch": "^9.0.5",
+    "@electron/asar": {
+      "minimatch": "^3.1.2"
+    },
     "@tootallnate/once": "^3.0.2",
     "http-proxy-agent": "^7.0.2",
     "tmp": "^0.2.4",
