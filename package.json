@@ -2,7 +2,7 @@
   "name": "kafka-safe-stream",
   "version": "2.0.0",
   "description": "A light weight bare minimum Kafka UI",
-  "main": "main.js",
+  "main": "src/main/main.js",
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

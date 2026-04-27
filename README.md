@@ -46,19 +46,19 @@
 ```mermaid
 flowchart TB
     subgraph Electron["Electron App"]
-        subgraph Main["Main process (main.js)"]
+        subgraph Main["Main process (src/main/main.js)"]
             Menu[Menu]
             Win[Windows: main / setup / about]
             IPC[IPC: setup, config, credentials]
         end
 
-        subgraph Renderer["Renderer (renderer.js)"]
+        subgraph Renderer["Renderer (src/renderer/renderer.js)"]
             Tabs[Produce · Consume · Topics · Lag · Cluster]
             CM[CodeMirror · filters · table · payload viewer window]
             Tabs --> CM
         end
 
-        subgraph Backend["backend/"]
+        subgraph Backend["src/backend/"]
             K[kafka.js]
             KC[kafkaConnection.js]
             Tmpl[templates.js]
@@ -82,7 +82,7 @@ flowchart TB
 sequenceDiagram
     participant User
     participant UI
-    participant K as backend/kafka.js
+    participant K as src/backend/kafka.js
     participant Kafka
 
     User->>UI: Env, topic, payload (and format / template if used)
@@ -100,7 +100,7 @@ sequenceDiagram
 sequenceDiagram
     participant User
     participant UI
-    participant K as backend/kafka.js
+    participant K as src/backend/kafka.js
     participant Kafka
 
     User->>UI: Env, topic, options (group, start, max, view)
@@ -218,19 +218,25 @@ Secrets (passwords, OAuth token, AWS secret key, TLS key passphrase) are **not**
 
 ```
 kafka-safe-stream/
-├── main.js                 # Main process, menu, windows, IPC
+├── src/
+│   ├── main/
+│   │   └── main.js         # Main process, menu, windows, IPC
+│   ├── renderer/
+│   │   ├── renderer.js     # UI, tabs, producer/consumer/inspector
+│   │   ├── setup.js
+│   │   └── payload-viewer.js
+│   └── backend/
+│       ├── kafka.js        # KafkaJS: produce, consume, admin, lag
+│       ├── kafkaConnection.js
+│       ├── templates.js    # Saved producer templates
+│       └── randomTokens.js # Token expansion for templates
 ├── index.html              # Main shell
-├── renderer.js             # UI, tabs, producer/consumer/inspector
-├── styles.css
-├── setup.html / setup.js / setup.css
+├── setup.html / setup.css
+├── payload-viewer.html / payload-viewer.css  # Detached payload window
 ├── about.html / about.css
-├── payload-viewer.html / payload-viewer.js   # Detached payload window
+├── styles.css
+├── theme-variables.css
 ├── schema.json
-├── backend/
-│   ├── kafka.js            # KafkaJS: produce, consume, admin, lag
-│   ├── kafkaConnection.js
-│   ├── templates.js        # Saved producer templates
-│   └── randomTokens.js     # Token expansion for templates
 ├── codemirror/
 ├── package.json
 ├── forge.config.js

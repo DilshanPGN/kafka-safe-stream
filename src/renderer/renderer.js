@@ -12,10 +12,10 @@ const {
     deleteConsumerGroups,
     appendOffsetResetAudit,
     getClusterMetadata,
-} = require('./backend/kafka');
-const { normalizeConnection, connectionFingerprint, isKafkaAuthError } = require('./backend/kafkaConnection');
-const templatesApi = require('./backend/templates');
-const { expandTokens, TOKEN_INSERT_OPTIONS } = require('./backend/randomTokens');
+} = require('./src/backend/kafka');
+const { normalizeConnection, connectionFingerprint, isKafkaAuthError } = require('./src/backend/kafkaConnection');
+const templatesApi = require('./src/backend/templates');
+const { expandTokens, TOKEN_INSERT_OPTIONS } = require('./src/backend/randomTokens');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1931,11 +1931,12 @@ function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
     const { committedCell, lagCell } = lagCommittedAndLagCells(pr);
     const { clientsTitle, clientsBody } = lagClientsCells(clientsStr, clientsShort);
     const unsafe = isUnsafeConsumerGroupOpsAllowed();
+    const lagActionsDisabledAttr = lagResetInFlight ? 'disabled' : '';
     const actionCell = unsafe
         ? `<td class="lag-action-cell lag-col-actions">
                     <div class="lag-action-buttons">
-                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Reset to latest</button>
-                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagResetInFlight ? 'disabled' : ''}>Delete group</button>
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagActionsDisabledAttr}>Reset to latest</button>
+                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagActionsDisabledAttr}>Delete group</button>
                     </div>
                 </td>`
         : '<td class="lag-action-cell lag-col-actions" aria-hidden="true"></td>';

@@ -20,10 +20,10 @@ function createWindow() {
             nodeIntegration: true,
             contextIsolation: false,
         },
-        icon: path.join(__dirname, 'kss_logo.png'),
+        icon: path.join(__dirname, '../../kss_logo.png'),
     });
 
-    mainWindow.loadFile('index.html');
+    mainWindow.loadFile(path.join(__dirname, '../../index.html'));
 
     const menu = Menu.buildFromTemplate(isMac ? macMenu : winMenu);
     Menu.setApplicationMenu(menu);
@@ -66,10 +66,10 @@ function createAboutWindow() {
             contextIsolation: true,
         },
         resizable: false,
-        icon: path.join(__dirname, 'kss_logo.png'),
+        icon: path.join(__dirname, '../../kss_logo.png'),
     });
 
-    aboutWindow.loadFile(path.join(__dirname, './about.html'));
+    aboutWindow.loadFile(path.join(__dirname, '../../about.html'));
 
     aboutWindow.on('closed', () => {
         aboutWindow = null;
@@ -103,10 +103,10 @@ function createSetupWindow(explicitTheme) {
             contextIsolation: false,
             additionalArguments: [`--kss-theme=${theme}`],
         },
-        icon: path.join(__dirname, 'kss_logo.png'),
+        icon: path.join(__dirname, '../../kss_logo.png'),
     });
 
-    setupWindow.loadFile(path.join(__dirname, './setup.html'));
+    setupWindow.loadFile(path.join(__dirname, '../../setup.html'));
 
     setupWindow.on('closed', () => {
         setupWindow = null;
