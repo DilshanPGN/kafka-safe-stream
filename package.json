@@ -1,6 +1,6 @@
 {
   "name": "kafka-safe-stream",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A light weight bare minimum Kafka UI",
   "main": "main.js",
   "scripts": {
