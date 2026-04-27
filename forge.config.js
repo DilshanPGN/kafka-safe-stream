@@ -31,7 +31,7 @@ module.exports = {
       name: "@rabbitholesyndrome/electron-forge-maker-portable",
       config: {
         portable: {
-          artifactName: "kafka-safe-stream-1.0.0.exe"
+          artifactName: "kafka-safe-stream-2.0.0.exe"
         }
       }
     },
