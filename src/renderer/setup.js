@@ -3,8 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const Ajv = require('ajv');
-const { probeClusterConnection, brokerListFromInput } = require('./backend/kafka');
-const { normalizeConnection } = require('./backend/kafkaConnection');
+const { probeClusterConnection, brokerListFromInput } = require('./src/backend/kafka');
+const { normalizeConnection } = require('./src/backend/kafkaConnection');
 
 const THEME_STORAGE_KEY = 'kss-theme';
 const ENV_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
