@@ -657,7 +657,12 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
     }
 
     consumerStopping = false;
-    consumer = kafka.consumer({ groupId });
+    const consumerConfig = { groupId };
+    if (startMode === 'offset') {
+        // Specific-offset reads should not advance committed group offsets.
+        consumerConfig.autoCommit = false;
+    }
+    consumer = kafka.consumer(consumerConfig);
 
     let received = 0;
     const limit = (typeof maxMessages === 'number' && maxMessages > 0) ? maxMessages : null;
