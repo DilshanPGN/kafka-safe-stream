@@ -657,11 +657,19 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
     }
 
     consumerStopping = false;
-    consumer = kafka.consumer({ groupId });
+    const consumerConfig = { groupId };
+    if (startMode === 'offset') {
+        // Specific-offset reads should not advance committed group offsets.
+        consumerConfig.autoCommit = false;
+    }
+    consumer = kafka.consumer(consumerConfig);
 
     let received = 0;
     const limit = (typeof maxMessages === 'number' && maxMessages > 0) ? maxMessages : null;
     let stopRequested = false;
+    const targetOffsetNumber = startMode === 'offset' && offset !== null && offset !== undefined && offset !== ''
+        ? Number(offset)
+        : null;
 
     const stopFromInside = async () => {
         if (stopRequested) return;
@@ -693,6 +701,13 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
                 if (stopRequested || consumerStopping) return;
                 if (partition !== null && partition !== undefined && Number(p) !== Number(partition)) {
                     return;
+                }
+                if (targetOffsetNumber !== null && Number.isFinite(targetOffsetNumber)) {
+                    const msgOffset = Number(message.offset);
+                    if (Number.isFinite(msgOffset) && msgOffset < targetOffsetNumber) {
+                        // Ignore stale records delivered before seek fully applies.
+                        return;
+                    }
                 }
                 received += 1;
                 try {

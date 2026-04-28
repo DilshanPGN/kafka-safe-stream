@@ -1071,6 +1071,11 @@ body.options-resizing * {
     color: var(--color-accent);
 }
 
+body[data-theme="dark"] .consumer-messages-table .consumer-msg-value-cell {
+    color: var(--color-heading);
+    font-weight: 600;
+}
+
 .consumer-messages-table .consumer-msg-value-cell--openable {
     display: flex;
     flex-wrap: wrap;
