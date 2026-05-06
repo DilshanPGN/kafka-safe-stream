@@ -70,8 +70,6 @@ function newEnv() {
         probeSecrets: {
             password: '',
             oauthAccessToken: '',
-            awsSecretAccessKey: '',
-            awsSessionToken: '',
             sslKeyPassphrase: '',
         },
     };
@@ -156,8 +154,6 @@ function applyConfigFromObject(obj) {
             probeSecrets: {
                 password: '',
                 oauthAccessToken: '',
-                awsSecretAccessKey: '',
-                awsSessionToken: '',
                 sslKeyPassphrase: '',
             },
         };
@@ -313,6 +309,9 @@ function syncConnFromPanel(env) {
         username: document.getElementById('connUsername').value,
         awsAccessKeyId: document.getElementById('connAwsAccessKeyId').value,
         awsAuthorizationIdentity: document.getElementById('connAwsAuthz').value,
+        awsRoleArn: document.getElementById('connAwsRoleArn').value,
+        awsRoleSessionName: document.getElementById('connAwsRoleSessionName').value,
+        awsProfile: document.getElementById('connAwsProfile').value,
         rejectUnauthorized: document.getElementById('connRejectUnauthorized').checked,
         caFile: document.getElementById('connCaFile').value,
         certFile: document.getElementById('connCertFile').value,
@@ -321,13 +320,9 @@ function syncConnFromPanel(env) {
     env.probeSecrets = env.probeSecrets || {};
     const pp = document.getElementById('connProbePassword');
     const po = document.getElementById('connProbeOauth');
-    const pas = document.getElementById('connProbeAwsSecret');
-    const pat = document.getElementById('connProbeAwsSession');
     const pssl = document.getElementById('connProbeSslPass');
     if (pp) env.probeSecrets.password = pp.value;
     if (po) env.probeSecrets.oauthAccessToken = po.value;
-    if (pas) env.probeSecrets.awsSecretAccessKey = pas.value;
-    if (pat) env.probeSecrets.awsSessionToken = pat.value;
     if (pssl) env.probeSecrets.sslKeyPassphrase = pssl.value;
 }
 
@@ -341,10 +336,6 @@ function buildProbeSecretsForTest(env) {
     }
     if (conn.saslMechanism === 'oauthbearer' && ps.oauthAccessToken) {
         secrets.oauthAccessToken = String(ps.oauthAccessToken).trim();
-    }
-    if (conn.saslMechanism === 'aws') {
-        if (ps.awsSecretAccessKey) secrets.awsSecretAccessKey = ps.awsSecretAccessKey;
-        if (ps.awsSessionToken) secrets.awsSessionToken = ps.awsSessionToken;
     }
     if (conn.keyFile && ps.sslKeyPassphrase) {
         secrets.sslKeyPassphrase = ps.sslKeyPassphrase;
@@ -464,13 +455,28 @@ function buildConnectionDetailsHtml(c, ps) {
                             <div class="connection-card-title">AWS MSK IAM identity</div>
                             <div class="two-col">
                                 <div class="field">
-                                    <label for="connAwsAccessKeyId">AWS access key id (MSK IAM)</label>
-                                    <input type="text" id="connAwsAccessKeyId" class="conn-control" autocomplete="off" value="${escapeHtml(c.awsAccessKeyId)}" />
+                                    <label for="connAwsProfile">AWS profile (optional)</label>
+                                    <input type="text" id="connAwsProfile" class="conn-control" autocomplete="off" placeholder="default" value="${escapeHtml(c.awsProfile)}" />
                                 </div>
                                 <div class="field">
                                     <label for="connAwsAuthz">AWS authorization identity</label>
-                                    <input type="text" id="connAwsAuthz" class="conn-control" autocomplete="off" placeholder="Required for MSK IAM" value="${escapeHtml(c.awsAuthorizationIdentity)}" />
+                                    <input type="text" id="connAwsAuthz" class="conn-control" autocomplete="off" placeholder="Defaults to user" value="${escapeHtml(c.awsAuthorizationIdentity)}" />
                                 </div>
+                            </div>
+                            <div class="two-col">
+                                <div class="field">
+                                    <label for="connAwsRoleArn">Assume role ARN (optional)</label>
+                                    <input type="text" id="connAwsRoleArn" class="conn-control" autocomplete="off" placeholder="arn:aws:iam::123456789012:role/RoleName" value="${escapeHtml(c.awsRoleArn)}" />
+                                </div>
+                                <div class="field">
+                                    <label for="connAwsRoleSessionName">Role session name (optional)</label>
+                                    <input type="text" id="connAwsRoleSessionName" class="conn-control" autocomplete="off" placeholder="kafka-safe-stream" value="${escapeHtml(c.awsRoleSessionName)}" />
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label for="connAwsAccessKeyId">AWS access key id override (optional)</label>
+                                <input type="text" id="connAwsAccessKeyId" class="conn-control" autocomplete="off" value="${escapeHtml(c.awsAccessKeyId)}" />
+                                <p class="field-hint">Leave blank to use AWS credentials from environment/profile or assume role via AWS CLI.</p>
                             </div>
                         </div>
                         <p class="field-hint" id="connGroupSecretsHint">Passwords and secrets are not saved in the config file. Use the probe fields only for <strong>Test connection</strong>; in the main app, secrets are requested when needed and stored encrypted when possible.</p>
@@ -488,19 +494,6 @@ function buildConnectionDetailsHtml(c, ps) {
                             <div class="connection-card-title">Probe secret</div>
                             <label for="connProbeOauth">Probe: OAuth access token</label>
                             <textarea id="connProbeOauth" class="conn-control" rows="2" spellcheck="false">${escapeHtml(ps.oauthAccessToken)}</textarea>
-                        </div>
-                        <div id="connGroupProbeAws" class="connection-card">
-                            <div class="connection-card-title">Probe secret</div>
-                            <div class="two-col">
-                                <div class="field">
-                                    <label for="connProbeAwsSecret">Probe: AWS secret key</label>
-                                    <input type="password" id="connProbeAwsSecret" class="conn-control" autocomplete="new-password" value="${escapeHtml(ps.awsSecretAccessKey)}" />
-                                </div>
-                                <div class="field">
-                                    <label for="connProbeAwsSession">Probe: AWS session token (optional)</label>
-                                    <input type="password" id="connProbeAwsSession" class="conn-control" autocomplete="new-password" value="${escapeHtml(ps.awsSessionToken)}" />
-                                </div>
-                            </div>
                         </div>
                     </div>
                 </details>`;
@@ -534,7 +527,6 @@ function updateConnectionFieldVisibility() {
 
     const showAws = useSasl && mech === 'aws';
     setConnGroupDisplay('connGroupAwsIdentity', showAws);
-    setConnGroupDisplay('connGroupProbeAws', showAws);
 
     const showOauth = useSasl && mech === 'oauthbearer';
     setConnGroupDisplay('connGroupProbeOauth', showOauth);
@@ -543,7 +535,7 @@ function updateConnectionFieldVisibility() {
     const showProbeSsl = useTls && Boolean(keyPath);
     setConnGroupDisplay('connGroupProbeSsl', showProbeSsl);
 
-    const anyProbe = showScram || showAws || showOauth || showProbeSsl;
+    const anyProbe = showScram || showOauth || showProbeSsl;
     setConnGroupDisplay('connGroupSecretsHint', anyProbe);
 }
 
@@ -693,8 +685,9 @@ function renderEnvPanel() {
     };
     [
         'connSecurityProtocol', 'connSaslMechanism', 'connUsername', 'connAwsAccessKeyId',
-        'connAwsAuthz', 'connCaFile', 'connCertFile', 'connKeyFile',
-        'connProbePassword', 'connProbeOauth', 'connProbeAwsSecret', 'connProbeAwsSession', 'connProbeSslPass',
+        'connAwsAuthz', 'connAwsRoleArn', 'connAwsRoleSessionName', 'connAwsProfile',
+        'connCaFile', 'connCertFile', 'connKeyFile',
+        'connProbePassword', 'connProbeOauth', 'connProbeSslPass',
     ].forEach((id) => {
         const el = document.getElementById(id);
         if (!el) return;

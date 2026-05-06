@@ -11,6 +11,9 @@ const DEFAULT_CONNECTION = Object.freeze({
     username: '',
     awsAccessKeyId: '',
     awsAuthorizationIdentity: '',
+    awsRoleArn: '',
+    awsRoleSessionName: '',
+    awsProfile: '',
     rejectUnauthorized: true,
     caFile: '',
     certFile: '',
@@ -37,11 +40,75 @@ function normalizeConnection(raw) {
         username: typeof c.username === 'string' ? c.username : '',
         awsAccessKeyId: typeof c.awsAccessKeyId === 'string' ? c.awsAccessKeyId : '',
         awsAuthorizationIdentity: typeof c.awsAuthorizationIdentity === 'string' ? c.awsAuthorizationIdentity : '',
+        awsRoleArn: typeof c.awsRoleArn === 'string' ? c.awsRoleArn : '',
+        awsRoleSessionName: typeof c.awsRoleSessionName === 'string' ? c.awsRoleSessionName : '',
+        awsProfile: typeof c.awsProfile === 'string' ? c.awsProfile : '',
         rejectUnauthorized: c.rejectUnauthorized !== false,
         caFile: typeof c.caFile === 'string' ? c.caFile : '',
         certFile: typeof c.certFile === 'string' ? c.certFile : '',
         keyFile: typeof c.keyFile === 'string' ? c.keyFile : '',
     };
+}
+
+function nonEmpty(value) {
+    const s = String(value || '').trim();
+    return s || '';
+}
+
+function inferAwsRegionFromBrokers(brokers) {
+    const list = Array.isArray(brokers) ? brokers : [];
+    for (const broker of list) {
+        const s = String(broker || '').trim().toLowerCase();
+        if (!s) continue;
+        const host = s.split(':')[0];
+        const m = host.match(/kafka\.([a-z0-9-]+)\.amazonaws\.com$/);
+        if (m && m[1]) return m[1];
+    }
+    return '';
+}
+
+function loadMskSigner() {
+    try {
+        // Loaded lazily so users not using AWS IAM can still run normally.
+        return require('aws-msk-iam-sasl-signer-js');
+    } catch (err) {
+        throw new Error(
+            `AWS_MSK_IAM requires the "aws-msk-iam-sasl-signer-js" package. Install it and retry. ${err.message}`
+        );
+    }
+}
+
+async function buildAwsMskIamToken(connection, brokers) {
+    const region = inferAwsRegionFromBrokers(brokers);
+    if (!region) {
+        throw new Error('Could not infer AWS region from broker host. Use an MSK broker endpoint (*.kafka.<region>.amazonaws.com).');
+    }
+    const signer = loadMskSigner();
+    const roleArn = nonEmpty(connection.awsRoleArn);
+    const roleSessionName = nonEmpty(connection.awsRoleSessionName) || 'kafka-safe-stream';
+    const profile = nonEmpty(connection.awsProfile || process.env.AWS_PROFILE);
+
+    let response;
+    if (roleArn && typeof signer.generateAuthTokenFromRole === 'function') {
+        response = await signer.generateAuthTokenFromRole({
+            region,
+            awsRoleArn: roleArn,
+            awsRoleSessionName: roleSessionName,
+        });
+    } else if (profile && typeof signer.generateAuthTokenFromProfile === 'function') {
+        response = await signer.generateAuthTokenFromProfile({
+            region,
+            awsProfileName: profile,
+        });
+    } else if (typeof signer.generateAuthToken === 'function') {
+        response = await signer.generateAuthToken({ region });
+    } else {
+        throw new Error('aws-msk-iam-sasl-signer-js does not expose a supported token generator');
+    }
+    if (!response || !response.token) {
+        throw new Error('MSK IAM token generator returned an empty token');
+    }
+    return String(response.token);
 }
 
 /**
@@ -102,9 +169,10 @@ function buildTlsSslObject(connection, sec) {
 
 /**
  * @param {typeof DEFAULT_CONNECTION} connection
- * @param {{ password?: string, oauthAccessToken?: string, awsSecretAccessKey?: string, awsSessionToken?: string }} sec
+ * @param {{ password?: string, oauthAccessToken?: string }} sec
+ * @param {string[]} brokers
  */
-function buildSaslObject(connection, sec) {
+function buildSaslObject(connection, sec, brokers) {
     const mech = connection.saslMechanism;
     if (mech === 'plain' || mech === 'scram-sha-256' || mech === 'scram-sha-512') {
         return {
@@ -121,13 +189,12 @@ function buildSaslObject(connection, sec) {
         };
     }
     if (mech === 'aws') {
-        const authz = String(connection.awsAuthorizationIdentity || '').trim() || 'user';
         return {
-            mechanism: 'aws',
-            authorizationIdentity: authz,
-            accessKeyId: String(connection.awsAccessKeyId || ''),
-            secretAccessKey: String(sec.awsSecretAccessKey || ''),
-            sessionToken: String(sec.awsSessionToken || ''),
+            mechanism: 'oauthbearer',
+            oauthBearerProvider: async () => {
+                const token = await buildAwsMskIamToken(connection, brokers);
+                return { value: token };
+            },
         };
     }
     return undefined;
@@ -138,7 +205,7 @@ function buildSaslObject(connection, sec) {
  * @param {{ password?: string, oauthAccessToken?: string, awsSecretAccessKey?: string, awsSessionToken?: string, sslKeyPassphrase?: string }} secrets
  * @returns {{ ssl?: boolean|object, sasl?: object }}
  */
-function buildSslAndSasl(connection, secrets) {
+function buildSslAndSasl(connection, secrets, brokers) {
     const sec = secrets && typeof secrets === 'object' ? secrets : {};
     const useTls = connection.securityProtocol === 'SSL' || connection.securityProtocol === 'SASL_SSL';
     const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT' || connection.securityProtocol === 'SASL_SSL';
@@ -151,7 +218,7 @@ function buildSslAndSasl(connection, secrets) {
 
     let sasl;
     if (useSasl && mech !== 'none') {
-        sasl = buildSaslObject(connection, sec);
+        sasl = buildSaslObject(connection, sec, brokers);
     }
 
     return { ssl, sasl };
@@ -167,7 +234,7 @@ function buildKafkaClientConfig(args) {
         throw new Error('At least one broker is required');
     }
     const connection = normalizeConnection(args.connection);
-    const { ssl, sasl } = buildSslAndSasl(connection, args.secrets);
+    const { ssl, sasl } = buildSslAndSasl(connection, args.secrets, brokers);
 
     /** @type {import('kafkajs').KafkaConfig} */
     const cfg = { brokers };

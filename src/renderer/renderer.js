@@ -382,10 +382,6 @@ function showKafkaCredentialModal(args) {
                 showAlert('Credentials', 'Access token is required.');
                 return;
             }
-            if (showAws && !out.awsSecretAccessKey) {
-                showAlert('Credentials', 'AWS secret access key is required.');
-                return;
-            }
             cleanup(out);
         };
 
