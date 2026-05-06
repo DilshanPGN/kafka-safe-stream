@@ -67,10 +67,11 @@
                   <textarea id="kafka-auth-oauth" rows="3" spellcheck="false" placeholder="Paste access token"></textarea>
               </div>
               <div id="kafka-auth-group-aws" class="kafka-auth-field-group" style="display: none;">
-                  <label for="kafka-auth-aws-secret">AWS secret access key</label>
+                  <label for="kafka-auth-aws-secret">AWS secret access key (optional override)</label>
                   <input type="password" id="kafka-auth-aws-secret" autocomplete="off" />
                   <label for="kafka-auth-aws-session">Session token (optional)</label>
                   <input type="password" id="kafka-auth-aws-session" autocomplete="off" />
+                  <p class="field-hint">Leave blank to use AWS credentials from env/profile or assumed role configured in setup.</p>
               </div>
               <div id="kafka-auth-group-ssl" class="kafka-auth-field-group" style="display: none;">
                   <label for="kafka-auth-ssl-pass">TLS client key passphrase (optional)</label>
