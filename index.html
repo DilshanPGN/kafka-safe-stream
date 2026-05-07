@@ -320,7 +320,9 @@
                   <div class="topics-toolbar">
                       <input type="text" id="topicsSearchInput" placeholder="Search topics…" />
                       <button id="refreshTopicsButton" class="btn-secondary">↻ Refresh</button>
+                      <button id="cancelTopicsButton" class="btn-secondary topics-cancel-btn" type="button" hidden>Cancel</button>
                       <span id="topicsCount" class="message-count">0 topics</span>
+                      <span id="topicsStatus" class="topics-status" role="status" aria-live="polite"></span>
                   </div>
                   <div id="topicsTableWrapper" class="topics-table-wrapper">
                       <table id="topicsTable" class="topics-table">

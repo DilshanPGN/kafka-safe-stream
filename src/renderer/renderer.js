@@ -100,6 +100,8 @@ let consumer = null;
 let consumerBlinkOn = false;
 let consumerGroup = DEFAULT_GROUP;
 let topicsCache = [];
+let topicsLoadController = null;
+let topicsLoadSeq = 0;
 let consumedMessages = [];
 let selectedTemplateId = '';
 let producerFormat = DEFAULT_FORMAT;
@@ -420,6 +422,39 @@ async function persistKafkaSecretsFromModal(envId, formPayload, remember) {
     delete sessionSecretsByEnv[envId];
 }
 
+function shouldPromptForKafkaCredentials(connection) {
+    const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+        || connection.securityProtocol === 'SASL_SSL';
+    return (useSasl && connection.saslMechanism !== 'none')
+        || Boolean(connection.keyFile && String(connection.keyFile).trim());
+}
+
+function shouldRefreshExternalAwsCredentials(connection) {
+    const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
+        || connection.securityProtocol === 'SASL_SSL';
+    return useSasl && connection.saslMechanism === 'aws';
+}
+
+async function recoverKafkaAuthError(topicLabel, err) {
+    if (!isKafkaAuthError(err) || !activeEnv || !envConfig[activeEnv]) {
+        throw err;
+    }
+    const connection = normalizeConnection(envConfig[activeEnv].connection);
+    if (shouldRefreshExternalAwsCredentials(connection)) {
+        bumpSecretEpoch(activeEnv);
+        invalidateKafkaClientCache();
+        throw err;
+    }
+    if (!shouldPromptForKafkaCredentials(connection)) {
+        throw err;
+    }
+    const form = await showKafkaCredentialModal({ topicLabel, error: err, connection });
+    if (!form) throw err;
+    await persistKafkaSecretsFromModal(activeEnv, form, form.remember);
+    bumpSecretEpoch(activeEnv);
+    invalidateKafkaClientCache();
+}
+
 /**
  * Run a Kafka operation; on auth/TLS failure prompt for secrets and retry (bounded).
  * @param {string} topicLabel
@@ -432,23 +467,7 @@ async function withKafkaAuthRecovery(topicLabel, fn) {
             const kafka = await getKafkaClient();
             return await fn(kafka);
         } catch (err) {
-            if (!isKafkaAuthError(err) || !activeEnv || !envConfig[activeEnv]) {
-                throw err;
-            }
-            const connection = normalizeConnection(envConfig[activeEnv].connection);
-            const useSasl = connection.securityProtocol === 'SASL_PLAINTEXT'
-                || connection.securityProtocol === 'SASL_SSL';
-            const mech = connection.saslMechanism;
-            const needModal = (useSasl && mech !== 'none')
-                || (Boolean(connection.keyFile && String(connection.keyFile).trim()));
-            if (!needModal) {
-                throw err;
-            }
-            const form = await showKafkaCredentialModal({ topicLabel, error: err, connection });
-            if (!form) throw err;
-            await persistKafkaSecretsFromModal(activeEnv, form, form.remember);
-            bumpSecretEpoch(activeEnv);
-            invalidateKafkaClientCache();
+            await recoverKafkaAuthError(topicLabel, err);
         }
     }
     throw new Error('Kafka authentication failed after multiple attempts.');
@@ -1653,24 +1672,97 @@ async function refreshPartitions(topicName) {
 
 async function loadTopicsBrowser(forceRefresh = false) {
     const tbody = document.getElementById('topicsTableBody');
+    if (!tbody) return;
+    if (!forceRefresh && topicsCache.length > 0) {
+        renderTopicsBrowserResults();
+        return;
+    }
+    cancelTopicsBrowserLoad('');
+    const controller = new AbortController();
+    const loadSeq = startTopicsBrowserLoad(controller);
+    try {
+        await fetchTopicsBrowserData(controller);
+        if (isStaleTopicsBrowserLoad(loadSeq, controller)) return;
+        renderTopicsBrowserResults();
+    } catch (err) {
+        handleTopicsBrowserLoadError(loadSeq, err);
+    } finally {
+        finishTopicsBrowserLoad(loadSeq);
+    }
+}
+
+function startTopicsBrowserLoad(controller) {
+    topicsLoadSeq += 1;
+    topicsLoadController = controller;
+    setTopicsBrowserLoadingState(true, 'Loading topics and partition offsets…');
+    return topicsLoadSeq;
+}
+
+async function fetchTopicsBrowserData(controller) {
+    await withKafkaAuthRecovery('', async (kafka) => {
+        topicsCache = await getTopicsAndPartitions(kafka, { signal: controller.signal });
+    });
+}
+
+function isStaleTopicsBrowserLoad(loadSeq, controller) {
+    return loadSeq !== topicsLoadSeq || controller.signal.aborted;
+}
+
+function renderTopicsBrowserResults() {
     const empty = document.getElementById('topicsEmptyState');
     const countEl = document.getElementById('topicsCount');
-    if (!tbody) return;
-    showLoading();
-    try {
-        if (forceRefresh || topicsCache.length === 0) {
-            await withKafkaAuthRecovery('', async (kafka) => {
-                topicsCache = await getTopicsAndPartitions(kafka);
-            });
-        }
-        renderTopicsTable();
-        if (countEl) countEl.textContent = `${topicsCache.length} topic${topicsCache.length === 1 ? '' : 's'}`;
-        if (empty) empty.style.display = topicsCache.length === 0 ? 'block' : 'none';
-    } catch (err) {
-        showAlert('Failed to load topics', err.message);
-    } finally {
-        hideLoading();
+    renderTopicsTable();
+    if (countEl) countEl.textContent = `${topicsCache.length} topic${topicsCache.length === 1 ? '' : 's'}`;
+    if (empty) empty.style.display = topicsCache.length === 0 ? 'block' : 'none';
+}
+
+function handleTopicsBrowserLoadError(loadSeq, err) {
+    if (loadSeq !== topicsLoadSeq || isAbortError(err)) {
+        setTopicsBrowserLoadingState(false, 'Topic loading cancelled.');
+        return;
     }
+    showAlert('Failed to load topics', err.message);
+}
+
+function finishTopicsBrowserLoad(loadSeq) {
+    if (loadSeq === topicsLoadSeq) {
+        topicsLoadController = null;
+        setTopicsBrowserLoadingState(false, '');
+    }
+}
+
+function isAbortError(err) {
+    return Boolean(err && (
+        err.name === 'AbortError'
+        || /aborted|cancelled|canceled/i.test(String(err.message || err))
+    ));
+}
+
+function setTopicsBrowserLoadingState(isLoading, message) {
+    const refreshBtn = document.getElementById('refreshTopicsButton');
+    const cancelBtn = document.getElementById('cancelTopicsButton');
+    const status = document.getElementById('topicsStatus');
+    const empty = document.getElementById('topicsEmptyState');
+    if (refreshBtn) refreshBtn.disabled = isLoading;
+    if (cancelBtn) cancelBtn.hidden = !isLoading;
+    if (status) status.textContent = message || '';
+    if (empty && isLoading && topicsCache.length === 0) {
+        empty.textContent = message || 'Loading topics…';
+        empty.style.display = 'block';
+    } else if (empty && !isLoading && topicsCache.length === 0) {
+        empty.textContent = 'No topics loaded. Click Refresh to load.';
+    }
+}
+
+function cancelTopicsBrowserLoad(message) {
+    if (!topicsLoadController) {
+        if (message !== undefined) setTopicsBrowserLoadingState(false, message);
+        return;
+    }
+    topicsLoadSeq += 1;
+    topicsLoadController.abort();
+    topicsLoadController = null;
+    setTopicsBrowserLoadingState(false, message || 'Topic loading cancelled.');
 }
 
 function renderTopicsTable() {
@@ -2639,9 +2731,13 @@ function wireTemplateControls() {
 
 function wireTopicsBrowserControls() {
     const refreshBtn = document.getElementById('refreshTopicsButton');
+    const cancelBtn = document.getElementById('cancelTopicsButton');
     const searchInput = document.getElementById('topicsSearchInput');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => loadTopicsBrowser(true));
+    }
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', () => cancelTopicsBrowserLoad('Topic loading cancelled.'));
     }
     if (searchInput) {
         searchInput.addEventListener('input', renderTopicsTable);
@@ -2706,6 +2802,7 @@ function reloadProduceButton() {
 
 const onEnvChange = (envId) => {
     showLoading();
+    cancelTopicsBrowserLoad('');
 
     activeEnv = envId;
     activeTopicList = (envConfig[activeEnv].topicList || []).slice();
@@ -2810,6 +2907,10 @@ function syncConsumerChromeForActiveTab(tab) {
 }
 
 const onMethodTabClick = (tab) => {
+    const previousMethod = activeMethod;
+    if (previousMethod === 'topicsBrowser' && tab.id !== 'topicsBrowser') {
+        cancelTopicsBrowserLoad('Topic loading cancelled.');
+    }
     activeMethod = tab.id;
     if (activeEnv) {
         persistLastMethodForEnv(activeEnv, activeMethod);

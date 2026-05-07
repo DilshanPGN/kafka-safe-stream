@@ -20,6 +20,12 @@ const DEFAULT_CONNECTION = Object.freeze({
     keyFile: '',
 });
 
+const DEFAULT_KAFKA_TIMEOUTS = Object.freeze({
+    connectionTimeout: 10000,
+    authenticationTimeout: 15000,
+    requestTimeout: 30000,
+});
+
 /**
  * @param {unknown} raw
  * @returns {typeof DEFAULT_CONNECTION}
@@ -53,6 +59,24 @@ function normalizeConnection(raw) {
 function nonEmpty(value) {
     const s = String(value || '').trim();
     return s || '';
+}
+
+function fileMtimeOrNull(filePath) {
+    try {
+        const stat = fs.statSync(filePath);
+        return Math.round(stat.mtimeMs);
+    } catch {
+        return null;
+    }
+}
+
+function awsCredentialFilesFingerprint() {
+    const credentialsPath = expandPath(process.env.AWS_SHARED_CREDENTIALS_FILE || path.join(os.homedir(), '.aws', 'credentials'));
+    const configPath = expandPath(process.env.AWS_CONFIG_FILE || path.join(os.homedir(), '.aws', 'config'));
+    return {
+        credentials: fileMtimeOrNull(credentialsPath),
+        config: fileMtimeOrNull(configPath),
+    };
 }
 
 function inferAwsRegionFromBrokers(brokers) {
@@ -123,6 +147,9 @@ function connectionFingerprint(connection, brokers, hasPersistedOrSessionSecret)
         ...connection,
         brokers: b,
         hasSecret: !!hasPersistedOrSessionSecret,
+        awsCredentialFiles: connection.saslMechanism === 'aws'
+            ? awsCredentialFilesFingerprint()
+            : undefined,
     });
 }
 
@@ -237,7 +264,10 @@ function buildKafkaClientConfig(args) {
     const { ssl, sasl } = buildSslAndSasl(connection, args.secrets, brokers);
 
     /** @type {import('kafkajs').KafkaConfig} */
-    const cfg = { brokers };
+    const cfg = {
+        brokers,
+        ...DEFAULT_KAFKA_TIMEOUTS,
+    };
     if (ssl !== undefined) cfg.ssl = ssl;
     if (sasl) cfg.sasl = sasl;
     return cfg;
@@ -253,6 +283,7 @@ function isKafkaAuthError(err) {
     if (name === 'KafkaJSSASLAuthenticationError') return true;
     const msg = String(err.message || err);
     if (/SASL|Authentication failed|authentication failed|Invalid username or password/i.test(msg)) return true;
+    if (/ExpiredToken|expired token|security token.*expired|credentials.*expired|AWS credentials|Could not load credentials|CredentialsProviderError|fromIni|STS/i.test(msg)) return true;
     if (/self[- ]signed certificate|unable to verify the first certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|certificate has expired|EPROTO|wrong version number|tlsv1 alert/i.test(msg)) return true;
     return false;
 }

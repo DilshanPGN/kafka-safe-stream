@@ -37,6 +37,8 @@
     --cm-meta: #6b7280;
     --cm-bracket: #0f172a;
     --cm-selection: rgba(79, 70, 229, 0.18);
+    /* Caret must contrast editor background (do not use --color-accent: it is UI chrome, not editor chrome). */
+    --cm-cursor: #312e81;
 }
 
 body[data-theme="dark"] {
@@ -69,4 +71,5 @@ body[data-theme="dark"] {
     --cm-meta: #9d9d9d;
     --cm-bracket: #dddddd;
     --cm-selection: rgba(255, 255, 255, 0.16);
+    --cm-cursor: #ffffff;
 }

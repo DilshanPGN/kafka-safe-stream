@@ -38,7 +38,7 @@ body {
 }
 
 .CodeMirror-cursor {
-    border-left: 1px solid var(--color-accent);
+    border-left: 2px solid var(--cm-cursor);
 }
 
 .CodeMirror-lines {
