@@ -10,6 +10,18 @@ function logDebug(context, err) {
     }
 }
 
+function createOperationCancelledError(message) {
+    const err = new Error(message || 'Operation cancelled');
+    err.name = 'AbortError';
+    return err;
+}
+
+function throwIfAborted(signal) {
+    if (signal && signal.aborted) {
+        throw createOperationCancelledError();
+    }
+}
+
 async function safeAdminDisconnect(admin) {
     try {
         await admin.disconnect();
@@ -161,22 +173,40 @@ async function produceMessage(kafka, topic, message, key) {
     });
 }
 
-async function getTopicsAndPartitions(kafka) {
+async function getTopicsAndPartitions(kafka, options) {
     const admin = kafka.admin();
+    const signal = options && options.signal;
+    let aborting = false;
+    const onAbort = () => {
+        aborting = true;
+        safeAdminDisconnect(admin).catch((err) => logDebug('topics.abort.disconnect', err));
+    };
+    if (signal) {
+        throwIfAborted(signal);
+        signal.addEventListener('abort', onAbort, { once: true });
+    }
     try {
         await admin.connect();
+        throwIfAborted(signal);
         const topicNames = await admin.listTopics();
+        throwIfAborted(signal);
         const filtered = topicNames.filter((t) => !t.startsWith('__'));
         const metadata = await admin.fetchTopicMetadata({ topics: filtered });
+        throwIfAborted(signal);
         const offsetsMap = {};
         await Promise.all(filtered.map(async (t) => {
             try {
+                throwIfAborted(signal);
                 offsetsMap[t] = await admin.fetchTopicOffsets(t);
             } catch (err) {
+                if (aborting || (signal && signal.aborted)) {
+                    throw createOperationCancelledError();
+                }
                 logDebug(`fetchTopicOffsets:${t}`, err);
                 offsetsMap[t] = [];
             }
         }));
+        throwIfAborted(signal);
 
         return metadata.topics
             .map((t) => {
@@ -206,6 +236,7 @@ async function getTopicsAndPartitions(kafka) {
             })
             .sort((a, b) => a.name.localeCompare(b.name));
     } finally {
+        if (signal) signal.removeEventListener('abort', onAbort);
         await safeAdminDisconnect(admin);
     }
 }
@@ -639,6 +670,46 @@ function appendOffsetResetAudit(event) {
     fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, 'utf8');
 }
 
+function hasConfiguredValue(value) {
+    return value !== null && value !== undefined && value !== '';
+}
+
+function runConsumerDoneCallback(onDone) {
+    if (typeof onDone !== 'function') return;
+    try {
+        onDone();
+    } catch (err) {
+        logDebug('consume onDone', err);
+    }
+}
+
+function shouldSkipConsumedMessage(args) {
+    if (args.stopRequested || consumerStopping) return true;
+    if (hasConfiguredValue(args.partition) && Number(args.messagePartition) !== Number(args.partition)) return true;
+    if (args.targetOffsetNumber === null || !Number.isFinite(args.targetOffsetNumber)) return false;
+    const msgOffset = Number(args.message.offset);
+    return Number.isFinite(msgOffset) && msgOffset < args.targetOffsetNumber;
+}
+
+async function seekConsumerToOffset(kafka, topic, partition, offset) {
+    const targetOffset = String(offset);
+    if (hasConfiguredValue(partition)) {
+        consumer.seek({ topic, partition: Number(partition), offset: targetOffset });
+        return;
+    }
+    try {
+        const admin = kafka.admin();
+        await admin.connect();
+        const partitionOffsets = await admin.fetchTopicOffsets(topic);
+        await admin.disconnect();
+        partitionOffsets.forEach((po) => {
+            consumer.seek({ topic, partition: po.partition, offset: targetOffset });
+        });
+    } catch (err) {
+        throw new Error('Failed to seek offsets: ' + err.message);
+    }
+}
+
 async function consumeMessages(kafka, options, onMessage, onDone) {
     const {
         topic,
@@ -667,7 +738,7 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
     let received = 0;
     const limit = (typeof maxMessages === 'number' && maxMessages > 0) ? maxMessages : null;
     let stopRequested = false;
-    const targetOffsetNumber = startMode === 'offset' && offset !== null && offset !== undefined && offset !== ''
+    const targetOffsetNumber = startMode === 'offset' && hasConfiguredValue(offset)
         ? Number(offset)
         : null;
 
@@ -678,13 +749,7 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
             try {
                 await stopConsuming();
             } finally {
-                if (typeof onDone === 'function') {
-                    try {
-                        onDone();
-                    } catch (err) {
-                        logDebug('consume onDone', err);
-                    }
-                }
+                runConsumerDoneCallback(onDone);
             }
         });
     };
@@ -698,17 +763,13 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
 
         await consumer.run({
             eachMessage: async ({ topic: t, partition: p, message }) => {
-                if (stopRequested || consumerStopping) return;
-                if (partition !== null && partition !== undefined && Number(p) !== Number(partition)) {
-                    return;
-                }
-                if (targetOffsetNumber !== null && Number.isFinite(targetOffsetNumber)) {
-                    const msgOffset = Number(message.offset);
-                    if (Number.isFinite(msgOffset) && msgOffset < targetOffsetNumber) {
-                        // Ignore stale records delivered before seek fully applies.
-                        return;
-                    }
-                }
+                if (shouldSkipConsumedMessage({
+                    stopRequested,
+                    partition,
+                    targetOffsetNumber,
+                    messagePartition: p,
+                    message,
+                })) return;
                 received += 1;
                 try {
                     onMessage({
@@ -730,23 +791,8 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
             },
         });
 
-        if (startMode === 'offset' && offset !== null && offset !== undefined) {
-            const targetOffset = String(offset);
-            if (partition !== null && partition !== undefined) {
-                consumer.seek({ topic, partition: Number(partition), offset: targetOffset });
-            } else {
-                try {
-                    const admin = kafka.admin();
-                    await admin.connect();
-                    const partitionOffsets = await admin.fetchTopicOffsets(topic);
-                    await admin.disconnect();
-                    partitionOffsets.forEach((po) => {
-                        consumer.seek({ topic, partition: po.partition, offset: targetOffset });
-                    });
-                } catch (err) {
-                    throw new Error('Failed to seek offsets: ' + err.message);
-                }
-            }
+        if (startMode === 'offset' && hasConfiguredValue(offset)) {
+            await seekConsumerToOffset(kafka, topic, partition, offset);
         }
     } catch (error) {
         throw new Error('Failed to connect to Kafka: ' + error.message);
