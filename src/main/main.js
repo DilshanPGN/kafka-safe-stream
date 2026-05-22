@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, shell, ipcMain, dialog, safeStorage } = requir
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const kafkaService = require('./kafkaService');
 const isMac = process.platform === 'darwin';
 const isDev = false;
 
@@ -24,6 +25,10 @@ function createWindow() {
     });
 
     mainWindow.loadFile(path.join(__dirname, '../../index.html'));
+
+    mainWindow.webContents.on('did-finish-load', () => {
+        kafkaService.setProgressWindow(mainWindow);
+    });
 
     const menu = Menu.buildFromTemplate(isMac ? macMenu : winMenu);
     Menu.setApplicationMenu(menu);
@@ -107,6 +112,10 @@ function createSetupWindow(explicitTheme) {
     });
 
     setupWindow.loadFile(path.join(__dirname, '../../setup.html'));
+
+    setupWindow.webContents.on('did-finish-load', () => {
+        kafkaService.setProgressWindow(setupWindow);
+    });
 
     setupWindow.on('closed', () => {
         setupWindow = null;
@@ -254,6 +263,93 @@ ipcMain.handle('save-consumed-export', async (_event, { defaultPath, filters }) 
         ],
     });
     return { canceled, filePath };
+});
+
+function kafkaOpHandler(handler) {
+    return async (event, payload) => {
+        const win = BrowserWindow.fromWebContents(event.sender);
+        if (win) kafkaService.setProgressWindow(win);
+        try {
+            return await handler(payload || {});
+        } catch (err) {
+            return { ok: false, error: err.message || String(err), authError: kafkaService.isKafkaAuthError(err) };
+        }
+    };
+}
+
+ipcMain.handle('kafka:cancel', async (_event, { opId }) => {
+    const cancelled = await kafkaService.cancelOp(opId);
+    return { ok: Boolean(cancelled) };
+});
+
+ipcMain.handle('kafka:invalidate-cache', (_event, { envId } = {}) => {
+    kafkaService.invalidateClientCache(envId || null);
+    return { ok: true };
+});
+
+ipcMain.handle('kafka:probe', kafkaOpHandler(async ({ ctx, opId }) => {
+    const result = await kafkaService.handleProbe(ctx, opId);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:get-topics', kafkaOpHandler(async ({ ctx, opId, metadataOnly }) => {
+    const result = await kafkaService.handleGetTopics(ctx, opId, metadataOnly);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:load-topic-message-counts', kafkaOpHandler(async ({ ctx, opId, topics }) => {
+    const result = await kafkaService.handleLoadTopicMessageCounts(ctx, opId, topics);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:get-topic-offsets', kafkaOpHandler(async ({ ctx, opId, topic }) => {
+    const result = await kafkaService.handleGetTopicOffsets(ctx, opId, topic);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:get-cluster-metadata', kafkaOpHandler(async ({ ctx, opId }) => {
+    const result = await kafkaService.handleGetClusterMetadata(ctx, opId);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:get-consumer-lag', kafkaOpHandler(async ({ ctx, opId, topicName }) => {
+    const result = await kafkaService.handleGetConsumerLag(ctx, opId, topicName);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:produce', kafkaOpHandler(async ({ ctx, opId, topic, message }) => {
+    const result = await kafkaService.handleProduce(ctx, opId, topic, message);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:ping-auth', kafkaOpHandler(async ({ ctx, opId }) => {
+    const result = await kafkaService.handlePingAuth(ctx, opId);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:consume-start', kafkaOpHandler(async ({ ctx, opId, options }) => {
+    const result = await kafkaService.handleConsumeStart(ctx, opId, options);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:consume-stop', async () => {
+    const result = await kafkaService.handleConsumeStop();
+    return { ok: true, result };
+});
+
+ipcMain.handle('kafka:reset-offsets', kafkaOpHandler(async ({ ctx, opId, options }) => {
+    const result = await kafkaService.handleResetOffsets(ctx, opId, options);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:delete-groups', kafkaOpHandler(async ({ ctx, opId, options }) => {
+    const result = await kafkaService.handleDeleteGroups(ctx, opId, options);
+    return { ok: true, result };
+}));
+
+ipcMain.handle('kafka:append-audit', (_event, { event: auditEvent }) => {
+    kafkaService.handleAppendAudit(auditEvent);
+    return { ok: true };
 });
 
 // Menu template

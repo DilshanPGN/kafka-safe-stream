@@ -3,6 +3,38 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { buildKafkaClientConfig } = require('./kafkaConnection');
+const { mapWithConcurrency } = require('./concurrency');
+
+/**
+ * KafkaJS record headers: values are Buffer, string, or an array of those.
+ * Normalize to UTF-8 strings for UI, export, and JSON safety.
+ * @param {import('kafkajs').IHeaders|Record<string, unknown>|null|undefined} headers
+ * @returns {Record<string, string>}
+ */
+function normalizeConsumedMessageHeaders(headers) {
+    const out = {};
+    if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return out;
+
+    function headerValueToUtf8(v) {
+        if (v == null) return '';
+        if (Buffer.isBuffer(v)) return v.toString('utf8');
+        if (v instanceof Uint8Array) return Buffer.from(v).toString('utf8');
+        if (typeof v === 'object' && v !== null && v.type === 'Buffer' && Array.isArray(v.data)) {
+            return Buffer.from(v.data).toString('utf8');
+        }
+        if (Array.isArray(v)) {
+            return v.map(headerValueToUtf8).filter((s) => s !== '').join(' | ');
+        }
+        if (typeof v === 'string') return v;
+        return String(v);
+    }
+
+    for (const [k, v] of Object.entries(headers)) {
+        if (k === '__proto__') continue;
+        out[k] = headerValueToUtf8(v);
+    }
+    return out;
+}
 
 function logDebug(context, err) {
     if (typeof console !== 'undefined' && typeof console.debug === 'function') {
@@ -85,6 +117,118 @@ function brokerListFromInput(raw) {
  * @param {string|string[]} brokersInput
  * @param {{ connection?: unknown, secrets?: object }} [authOptions]
  */
+function emitProgress(options, payload) {
+    if (options && typeof options.onProgress === 'function') {
+        options.onProgress(payload);
+    }
+}
+
+function computeTotalMessagesFromOffsets(offsets) {
+    if (!Array.isArray(offsets)) return null;
+    return offsets.reduce((sum, o) => {
+        const high = Number(o.high || 0);
+        const low = Number(o.low || 0);
+        return sum + Math.max(0, high - low);
+    }, 0);
+}
+
+function buildTopicRowFromMetadata(t, offsetsInfo) {
+    const partitions = (t.partitions || []).map((p) => ({
+        partitionId: p.partitionId,
+        leader: p.leader,
+        replicas: p.replicas,
+        isr: p.isr,
+    }));
+    const offsets = offsetsInfo && offsetsInfo.offsets ? offsetsInfo.offsets : [];
+    const offsetError = offsetsInfo && offsetsInfo.offsetError ? offsetsInfo.offsetError : null;
+    const totalMessages = (() => {
+        if (offsetsInfo && offsetsInfo.totalMessages != null) return offsetsInfo.totalMessages;
+        if (offsets.length) return computeTotalMessagesFromOffsets(offsets);
+        return null;
+    })();
+    const replicationFactor = partitions.length > 0
+        ? (partitions[0].replicas || []).length
+        : 0;
+    return {
+        name: t.name,
+        partitions,
+        partitionCount: partitions.length,
+        replicationFactor,
+        offsets,
+        totalMessages,
+        offsetError,
+        offsetsPending: offsetsInfo && offsetsInfo.offsetsPending === true,
+        messagesLoaded: Boolean(offsetsInfo && offsetsInfo.messagesLoaded),
+    };
+}
+
+// eslint-disable-next-line sonarjs/cognitive-complexity -- batched per-topic offset fetches
+async function fetchTopicOffsetCounts(admin, topicNames, offsetsMap, opts) {
+    const signal = opts && opts.signal;
+    const concurrency = (opts && opts.concurrency) || 10;
+    const computeBatch = typeof opts.computeTopicMessagesBatch === 'function'
+        ? opts.computeTopicMessagesBatch
+        : null;
+    let aborting = false;
+    const onAbort = () => { aborting = true; };
+    if (signal) {
+        throwIfAborted(signal);
+        signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    const offsetResults = await mapWithConcurrency(
+        topicNames,
+        concurrency,
+        async (topicName) => {
+            throwIfAborted(signal);
+            try {
+                const offsets = await admin.fetchTopicOffsets(topicName);
+                return { name: topicName, offsets, offsetError: null };
+            } catch (err) {
+                if (aborting || (signal && signal.aborted)) {
+                    throw createOperationCancelledError();
+                }
+                logDebug(`fetchTopicOffsets:${topicName}`, err);
+                return { name: topicName, offsets: [], offsetError: err.message || String(err) };
+            }
+        },
+        (opts && opts.onOffsetProgress) || undefined
+    );
+
+    throwIfAborted(signal);
+    if (signal) signal.removeEventListener('abort', onAbort);
+
+    const batches = chunkArray(offsetResults, 25);
+    for (const batch of batches) {
+        let computed = batch;
+        if (computeBatch) {
+            try {
+                computed = await computeBatch(batch);
+            } catch (err) {
+                logDebug('computeTopicMessagesBatch', err);
+            }
+        }
+        for (const entry of computed) {
+            offsetsMap.set(entry.name, {
+                offsets: entry.offsets || [],
+                totalMessages: entry.totalMessages != null
+                    ? entry.totalMessages
+                    : computeTotalMessagesFromOffsets(entry.offsets),
+                offsetError: entry.offsetError || null,
+                offsetsPending: false,
+                messagesLoaded: true,
+            });
+        }
+        if (typeof opts.onPartial === 'function') {
+            opts.onPartial(offsetsMap);
+        }
+    }
+}
+
+/**
+ * @param {string|string[]} brokersInput
+ * @param {{ connection?: unknown, secrets?: object, onProgress?: Function }} [authOptions]
+ */
 async function probeClusterConnection(brokersInput, authOptions) {
     const brokers = brokerListFromInput(brokersInput);
     if (!brokers.length) {
@@ -93,10 +237,14 @@ async function probeClusterConnection(brokersInput, authOptions) {
     const kafka = createKafkaClient(brokers, authOptions || {});
     const admin = kafka.admin();
     try {
+        emitProgress(authOptions, { phase: 'connect', current: 0, total: 3, message: 'Connecting to cluster…' });
         await admin.connect();
+        emitProgress(authOptions, { phase: 'describe', current: 1, total: 3, message: 'Describing cluster…' });
         const described = await admin.describeCluster();
+        emitProgress(authOptions, { phase: 'topics', current: 2, total: 3, message: 'Listing topics…' });
         const topicNames = await admin.listTopics();
         const filtered = topicNames.filter((t) => !t.startsWith('__')).sort((a, b) => a.localeCompare(b));
+        emitProgress(authOptions, { phase: 'done', current: 3, total: 3, message: `Found ${filtered.length} topics` });
         return {
             ok: true,
             clusterId: described.clusterId || '',
@@ -173,71 +321,219 @@ async function produceMessage(kafka, topic, message, key) {
     });
 }
 
-async function getTopicsAndPartitions(kafka, options) {
-    const admin = kafka.admin();
-    const signal = options && options.signal;
-    let aborting = false;
+function bindAdminAbortHandler(signal, admin, shouldDisconnect) {
+    if (!signal) return null;
     const onAbort = () => {
-        aborting = true;
-        safeAdminDisconnect(admin).catch((err) => logDebug('topics.abort.disconnect', err));
+        if (shouldDisconnect) {
+            safeAdminDisconnect(admin).catch((err) => logDebug('topics.abort.disconnect', err));
+        }
     };
+    signal.addEventListener('abort', onAbort, { once: true });
+    return onAbort;
+}
+
+async function getTopicsAndPartitions(kafka, options) {
+    const opts = options || {};
+    const signal = opts.signal;
+    const useExternalAdmin = Boolean(opts.admin);
+    const admin = useExternalAdmin ? opts.admin : kafka.admin();
+    const shouldDisconnect = !useExternalAdmin;
+    const concurrency = opts.concurrency || 10;
+    const computeBatch = typeof opts.computeTopicMessagesBatch === 'function'
+        ? opts.computeTopicMessagesBatch
+        : null;
+    const onAbort = bindAdminAbortHandler(signal, admin, shouldDisconnect);
     if (signal) {
         throwIfAborted(signal);
-        signal.addEventListener('abort', onAbort, { once: true });
     }
+
+    /** @type {Map<string, { offsets: object[], totalMessages: number|null, offsetError: string|null, offsetsPending?: boolean }>} */
+    const offsetsMap = new Map();
+
+    function buildPartialRows(metadataTopics) {
+        return metadataTopics
+            .map((t) => {
+                const info = offsetsMap.get(t.name) || {
+                    offsetsPending: false,
+                    messagesLoaded: false,
+                    offsets: [],
+                    totalMessages: null,
+                    offsetError: null,
+                };
+                return buildTopicRowFromMetadata(t, info);
+            })
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    function emitPartial(metadataTopics) {
+        if (typeof opts.onPartial === 'function') {
+            opts.onPartial(buildPartialRows(metadataTopics));
+        }
+    }
+
     try {
-        await admin.connect();
+        if (!useExternalAdmin) {
+            emitProgress(opts, { phase: 'connect', current: 0, total: 100, message: 'Connecting…' });
+            await admin.connect();
+        }
         throwIfAborted(signal);
+
+        emitProgress(opts, { phase: 'list', current: 5, total: 100, message: 'Listing topics…' });
         const topicNames = await admin.listTopics();
         throwIfAborted(signal);
         const filtered = topicNames.filter((t) => !t.startsWith('__'));
+
+        emitProgress(opts, { phase: 'metadata', current: 15, total: 100, message: 'Fetching topic metadata…' });
         const metadata = await admin.fetchTopicMetadata({ topics: filtered });
         throwIfAborted(signal);
-        const offsetsMap = {};
-        await Promise.all(filtered.map(async (t) => {
-            try {
-                throwIfAborted(signal);
-                offsetsMap[t] = await admin.fetchTopicOffsets(t);
-            } catch (err) {
-                if (aborting || (signal && signal.aborted)) {
-                    throw createOperationCancelledError();
-                }
-                logDebug(`fetchTopicOffsets:${t}`, err);
-                offsetsMap[t] = [];
-            }
-        }));
+
+        const metadataTopics = metadata.topics || [];
+        for (const t of metadataTopics) {
+            offsetsMap.set(t.name, {
+                offsetsPending: false,
+                offsets: [],
+                totalMessages: null,
+                offsetError: null,
+                messagesLoaded: false,
+            });
+        }
+        emitPartial(metadataTopics);
+        emitProgress(opts, {
+            phase: 'metadata-done',
+            current: opts.metadataOnly ? 100 : 30,
+            total: 100,
+            message: opts.metadataOnly
+                ? `Loaded ${metadataTopics.length} topics`
+                : `Loaded metadata for ${metadataTopics.length} topics`,
+        });
+
+        if (filtered.length === 0) {
+            return [];
+        }
+
+        if (opts.metadataOnly) {
+            emitProgress(opts, { phase: 'done', current: 100, total: 100, message: 'Topics loaded' });
+            return buildPartialRows(metadataTopics);
+        }
+
+        await fetchTopicOffsetCounts(admin, filtered, offsetsMap, {
+            signal,
+            concurrency,
+            computeTopicMessagesBatch: computeBatch,
+            onOffsetProgress: ({ current, total }) => {
+                const pct = 30 + Math.round((current / total) * 70);
+                emitProgress(opts, {
+                    phase: 'offsets',
+                    current,
+                    total,
+                    percent: pct,
+                    message: `Loading offsets (${current}/${total})…`,
+                });
+            },
+            onPartial: () => emitPartial(metadataTopics),
+        });
+
+        emitProgress(opts, { phase: 'done', current: 100, total: 100, message: 'Topics loaded' });
+        return buildPartialRows(metadataTopics);
+    } finally {
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+        if (shouldDisconnect) {
+            await safeAdminDisconnect(admin);
+        }
+    }
+}
+
+/**
+ * Fetch message counts (offsets) for topics already loaded via metadata.
+ * @param {import('kafkajs').Kafka} kafka
+ * @param {object[]} existingTopics topic rows from getTopicsAndPartitions(metadataOnly)
+ */
+async function loadTopicsMessageCounts(kafka, existingTopics, options) {
+    const opts = options || {};
+    const signal = opts.signal;
+    const useExternalAdmin = Boolean(opts.admin);
+    const admin = useExternalAdmin ? opts.admin : kafka.admin();
+    const shouldDisconnect = !useExternalAdmin;
+    const computeBatch = typeof opts.computeTopicMessagesBatch === 'function'
+        ? opts.computeTopicMessagesBatch
+        : null;
+    const list = Array.isArray(existingTopics) ? existingTopics : [];
+    const topicNames = list.map((t) => t.name).filter(Boolean);
+
+    if (!topicNames.length) return [];
+
+    /** @type {Map<string, object>} */
+    const offsetsMap = new Map();
+    for (const t of list) {
+        offsetsMap.set(t.name, {
+            offsetsPending: true,
+            offsets: t.offsets || [],
+            totalMessages: t.totalMessages,
+            offsetError: t.offsetError || null,
+            messagesLoaded: false,
+        });
+    }
+
+    const metadataTopics = list.map((t) => ({
+        name: t.name,
+        partitions: (t.partitions || []).map((p) => ({
+            partitionId: p.partitionId,
+            leader: p.leader,
+            replicas: p.replicas,
+            isr: p.isr,
+        })),
+    }));
+
+    function buildRows() {
+        return metadataTopics
+            .map((meta) => buildTopicRowFromMetadata(meta, offsetsMap.get(meta.name) || {}))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    if (typeof opts.onPartial === 'function') {
+        opts.onPartial(buildRows());
+    }
+
+    const onAbort = bindAdminAbortHandler(signal, admin, shouldDisconnect);
+    if (signal) {
+        throwIfAborted(signal);
+    }
+
+    try {
+        if (!useExternalAdmin) {
+            emitProgress(opts, { phase: 'connect', current: 0, total: 100, message: 'Connecting…' });
+            await admin.connect();
+        }
         throwIfAborted(signal);
 
-        return metadata.topics
-            .map((t) => {
-                const partitions = (t.partitions || []).map((p) => ({
-                    partitionId: p.partitionId,
-                    leader: p.leader,
-                    replicas: p.replicas,
-                    isr: p.isr,
-                }));
-                const offsets = offsetsMap[t.name] || [];
-                const totalMessages = offsets.reduce((sum, o) => {
-                    const high = Number(o.high || 0);
-                    const low = Number(o.low || 0);
-                    return sum + Math.max(0, high - low);
-                }, 0);
-                const replicationFactor = partitions.length > 0
-                    ? (partitions[0].replicas || []).length
-                    : 0;
-                return {
-                    name: t.name,
-                    partitions,
-                    partitionCount: partitions.length,
-                    replicationFactor,
-                    offsets,
-                    totalMessages,
-                };
-            })
-            .sort((a, b) => a.name.localeCompare(b.name));
+        await fetchTopicOffsetCounts(admin, topicNames, offsetsMap, {
+            signal,
+            concurrency: opts.concurrency || 10,
+            computeTopicMessagesBatch: computeBatch,
+            onOffsetProgress: ({ current, total }) => {
+                const pct = Math.round((current / total) * 100);
+                emitProgress(opts, {
+                    phase: 'offsets',
+                    current,
+                    total,
+                    percent: pct,
+                    message: `Loading message counts (${current}/${total})…`,
+                });
+            },
+            onPartial: () => {
+                if (typeof opts.onPartial === 'function') {
+                    opts.onPartial(buildRows());
+                }
+            },
+        });
+
+        emitProgress(opts, { phase: 'done', current: 100, total: 100, message: 'Message counts loaded' });
+        return buildRows();
     } finally {
-        if (signal) signal.removeEventListener('abort', onAbort);
-        await safeAdminDisconnect(admin);
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+        if (shouldDisconnect) {
+            await safeAdminDisconnect(admin);
+        }
     }
 }
 
@@ -367,8 +663,9 @@ async function buildTopicHealthSummary(admin) {
 /**
  * Cluster-level metadata from the broker metadata API (not JVM health / metrics).
  */
-async function getClusterMetadata(kafka, configuredBrokers) {
+async function getClusterMetadata(kafka, configuredBrokers, options) {
     const admin = kafka.admin();
+    const opts = options || {};
     const configuredSet = new Set(
         (configuredBrokers || []).map((b) => {
             const p = parseConfiguredBroker(b);
@@ -376,13 +673,16 @@ async function getClusterMetadata(kafka, configuredBrokers) {
         })
     );
     try {
+        emitProgress(opts, { phase: 'connect', current: 0, total: 4, message: 'Connecting…' });
         await admin.connect();
+        emitProgress(opts, { phase: 'describe', current: 1, total: 4, message: 'Describing cluster…' });
         const described = await admin.describeCluster();
         const topicNames = await admin.listTopics();
         const userTopics = topicNames.filter((t) => !t.startsWith('__'));
 
         let groupCount = null;
         try {
+            emitProgress(opts, { phase: 'groups', current: 2, total: 4, message: 'Listing consumer groups…' });
             const lg = await admin.listGroups();
             groupCount = new Set((lg.groups || []).map((g) => g.groupId)).size;
         } catch (err) {
@@ -401,10 +701,13 @@ async function getClusterMetadata(kafka, configuredBrokers) {
 
         let topicHealth = null;
         try {
+            emitProgress(opts, { phase: 'health', current: 3, total: 4, message: 'Analyzing topic health…' });
             topicHealth = await buildTopicHealthSummary(admin);
         } catch (err) {
             topicHealth = { error: err.message || String(err) };
         }
+
+        emitProgress(opts, { phase: 'done', current: 4, total: 4, message: 'Cluster metadata loaded' });
 
         return {
             clusterId: described.clusterId || '—',
@@ -424,14 +727,21 @@ async function getClusterMetadata(kafka, configuredBrokers) {
  * List consumer groups that have at least one committed offset for the topic,
  * with log end / lag per partition and describeGroups metadata.
  */
-async function getConsumerLagOverview(kafka, topicName) {
+// eslint-disable-next-line sonarjs/cognitive-complexity -- multi-phase lag scan with progress
+async function getConsumerLagOverview(kafka, topicName, options) {
     if (!topicName || typeof topicName !== 'string') {
         throw new Error('Topic is required');
     }
+    const opts = options || {};
+    const mergeBatch = typeof opts.mergeLagPartitionsBatch === 'function'
+        ? opts.mergeLagPartitionsBatch
+        : null;
     const admin = kafka.admin();
     try {
+        emitProgress(opts, { phase: 'connect', current: 0, total: 100, message: 'Connecting…' });
         await admin.connect();
 
+        emitProgress(opts, { phase: 'offsets', current: 5, total: 100, message: 'Fetching topic offsets…' });
         const topicOffsetRows = await admin.fetchTopicOffsets(topicName);
         const byPartition = new Map();
         for (const row of topicOffsetRows) {
@@ -441,12 +751,14 @@ async function getConsumerLagOverview(kafka, topicName) {
             byPartition.set(p, { high, low });
         }
 
+        emitProgress(opts, { phase: 'groups', current: 10, total: 100, message: 'Listing consumer groups…' });
         const listResult = await admin.listGroups();
         const rawIds = (listResult.groups || []).map((g) => g.groupId).filter(Boolean);
         const groupIds = [...new Set(rawIds)];
 
-        const FETCH_CONCURRENCY = 10;
+        const FETCH_CONCURRENCY = opts.concurrency || 10;
         const rawGroups = [];
+        let scanned = 0;
 
         for (let i = 0; i < groupIds.length; i += FETCH_CONCURRENCY) {
             const slice = groupIds.slice(i, i + FETCH_CONCURRENCY);
@@ -486,6 +798,15 @@ async function getConsumerLagOverview(kafka, topicName) {
                 })
             );
             rawGroups.push(...settled);
+            scanned += slice.length;
+            const pct = 10 + Math.round((scanned / Math.max(groupIds.length, 1)) * 60);
+            emitProgress(opts, {
+                phase: 'scan',
+                current: scanned,
+                total: groupIds.length,
+                percent: pct,
+                message: `Scanning groups (${scanned}/${groupIds.length})…`,
+            });
         }
 
         const withCommits = rawGroups.filter(
@@ -494,6 +815,7 @@ async function getConsumerLagOverview(kafka, topicName) {
                 g.partitionRows.some((pr) => pr.committed !== null)
         );
 
+        emitProgress(opts, { phase: 'describe', current: 75, total: 100, message: 'Describing consumer groups…' });
         const describeMap = new Map();
         for (const batch of chunkArray(
             withCommits.map((g) => g.groupId),
@@ -510,7 +832,7 @@ async function getConsumerLagOverview(kafka, topicName) {
             }
         }
 
-        const groups = withCommits.map((g) => {
+        let groups = withCommits.map((g) => {
             const d = describeMap.get(g.groupId) || {};
             const members = (d.members || []).map((m) => ({
                 memberId: m.memberId,
@@ -532,7 +854,23 @@ async function getConsumerLagOverview(kafka, topicName) {
             };
         });
 
+        if (mergeBatch && groups.length > 0) {
+            try {
+                const batches = chunkArray(groups, 50);
+                const merged = [];
+                for (const batch of batches) {
+                    const part = await mergeBatch(batch);
+                    merged.push(...part);
+                }
+                groups = merged;
+            } catch (err) {
+                logDebug('mergeLagPartitionsBatch', err);
+            }
+        }
+
         groups.sort((a, b) => b.totalLag - a.totalLag);
+
+        emitProgress(opts, { phase: 'done', current: 100, total: 100, message: 'Lag overview loaded' });
 
         return {
             topic: topicName,
@@ -779,7 +1117,7 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
                         timestamp: message.timestamp,
                         key: message.key ? message.key.toString() : null,
                         value: message.value ? message.value.toString() : '',
-                        headers: message.headers || {},
+                        headers: normalizeConsumedMessageHeaders(message.headers),
                     });
                 } catch (err) {
                     logDebug('consume onMessage', err);
@@ -821,10 +1159,14 @@ module.exports = {
     consumeMessages,
     stopConsuming,
     getTopicsAndPartitions,
+    loadTopicsMessageCounts,
     getTopicOffsets,
     getConsumerLagOverview,
     resetConsumerGroupOffsetsToLatest,
     deleteConsumerGroups,
     appendOffsetResetAudit,
     getClusterMetadata,
+    computeTotalMessagesFromOffsets,
+    buildTopicRowFromMetadata,
+    createOperationCancelledError,
 };

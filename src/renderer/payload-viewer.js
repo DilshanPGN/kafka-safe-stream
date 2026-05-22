@@ -41,7 +41,10 @@
 
         const formatId = data.formatId && ['json', 'xml', 'text'].includes(data.formatId) ? data.formatId : 'json';
         const labels = { json: 'JSON', xml: 'XML', text: 'Plain text' };
-        document.title = `Message — ${labels[formatId]}`;
+        const customTitle = typeof data.pageTitle === 'string' && data.pageTitle.trim() !== ''
+            ? data.pageTitle.trim()
+            : '';
+        document.title = customTitle || `Message — ${labels[formatId]}`;
 
         const text = data.text != null ? String(data.text) : '';
         const mode = modeForFormat(formatId);
