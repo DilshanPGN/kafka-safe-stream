@@ -7,13 +7,17 @@ This document explains how Kafka Safe Stream is implemented, including architect
 Kafka Safe Stream is an Electron desktop application with:
 
 - Main process orchestration in `main.js`
+- Main-process Kafka service in `kafkaService.js` (client cache, admin pool, IPC handlers, progress streaming)
+- Worker pool in `kafkaWorkerPool.js` + `workers/kafkaBatchWorker.js` for parallel offset aggregation
 - Renderer/UI and workflow logic in `renderer.js`
+- Renderer Kafka IPC bridge in `kafkaBridge.js`
 - Kafka integration and operations in `backend/kafka.js`
 - Connection/security config builder in `backend/kafkaConnection.js`
 - Setup/configuration UI logic in `setup.js`
 - Template persistence in `backend/templates.js`
 - Random token expansion in `backend/randomTokens.js`
 - Detached payload viewer in `payload-viewer.js`
+- Shared progress UI in `progress.js`
 
 The app reads configuration from `~/.kss/.config` and user preferences from `~/.kss/preferences.json`.
 
@@ -30,13 +34,43 @@ Responsibilities:
   - credential storage (`kss-credentials:get`, `kss-credentials:set`, `kss-credentials:clear`)
   - secure storage capability probe (`kss-credentials:encryption-available`)
   - file dialogs (`kss-select-file`, `save-consumed-export`)
+  - Kafka operations (`kafka:*` channels; delegated to `kafkaService.js`)
 
 Credential model:
 - Saved to `~/.kss/credentials.store.json`
 - Uses `electron.safeStorage` encryption when available.
 - Falls back to plain JSON payload only when OS encryption is unavailable.
 
-### 2.2 Renderer Process (`renderer.js`)
+### 2.2 Main-Process Kafka Service (`kafkaService.js`)
+
+Kafka network I/O runs in the main process (not the renderer) to keep the UI responsive on large clusters.
+
+Responsibilities:
+- Caches Kafka clients per environment + connection fingerprint (`clientCache`).
+- Reuses admin connections via an admin session pool (`adminPool`).
+- Tracks cancellable operations (`activeOps`) and streams progress/partial results to the renderer.
+- Delegates heavy offset aggregation to `kafkaWorkerPool.js` (worker threads).
+
+Progress events:
+- `kafka:progress` — phase, percent, message (e.g. listing topics, fetching metadata, loading offsets).
+- `kafka:partial` — incremental topic rows while a load is in progress.
+
+Key handlers (invoked from `main.js` IPC):
+- `handleGetTopics(ctx, opId, metadataOnly)` — topic list + metadata; skips offsets when `metadataOnly: true`.
+- `handleLoadTopicMessageCounts(ctx, opId, topics)` — fetches retained message counts for existing topic rows.
+- `handleGetClusterMetadata`, `handleGetConsumerLag`, `handleProduce`, `handleConsumeStart`, etc.
+
+IPC channels (renderer → main via `kafkaBridge.js`):
+
+| Channel | Purpose |
+|---------|---------|
+| `kafka:get-topics` | List topics + metadata; `metadataOnly` skips offset fetches |
+| `kafka:load-topic-message-counts` | Fetch retained message counts for existing topic rows |
+| `kafka:cancel` | Cancel in-flight operation by `opId` |
+| `kafka:progress` / `kafka:partial` | Main → renderer streaming updates during loads |
+| `kafka:probe`, `kafka:produce`, `kafka:consume-start`, … | Other cluster/produce/consume operations |
+
+### 2.3 Renderer Process (`renderer.js`)
 
 Responsibilities:
 - Loads and validates environment config (`loadConfig()`).
@@ -46,10 +80,19 @@ Responsibilities:
 - Maintains in-memory state (active env, topics, cached Kafka client, consumed messages, template selection, etc.).
 - Handles user interactions for Produce, Consume, Topics, Consumer lag, and Cluster tabs.
 
-### 2.3 Backend Layer (`backend/*.js`)
+### 2.4 Renderer Kafka Bridge (`kafkaBridge.js`)
 
-- `kafka.js`: Kafka producer, consumer, admin operations.
+Thin IPC wrapper used by the renderer instead of requiring `kafka.js` directly.
+
+- Assigns operation ids (`opId`) and registers progress/partial handlers per operation.
+- Maps `AbortSignal` abort to `kafka:cancel`.
+- Exposes `getTopicsAndPartitions(ctx, { metadataOnly, onProgress, onPartial, signal })` and `loadTopicsMessageCounts(ctx, topics, options)`.
+
+### 2.5 Backend Layer (`backend/*.js`)
+
+- `kafka.js`: Kafka producer, consumer, admin operations; phased topic loading.
 - `kafkaConnection.js`: TLS/SASL normalization and Kafka client config assembly.
+- `concurrency.js`: bounded concurrency (`mapWithConcurrency`) and retries (`withRetry`).
 - `templates.js`: local template CRUD against `~/.kss/templates.json`.
 - `randomTokens.js`: Faker-based token expansion (e.g., `{{$guid}}`, `{{$email}}`).
 
@@ -110,8 +153,15 @@ Consume:
   - Graceful consumer disconnect.
 
 Cluster/topic metadata:
-- `getTopicsAndPartitions(kafka)`
-  - Lists user topics (excludes internal `__*`), partition metadata, offsets, and estimated total message count.
+- `getTopicsAndPartitions(kafka, options)`
+  - Phased load: list topics → fetch metadata → optionally fetch offsets.
+  - When `options.metadataOnly === true`, returns after metadata (no per-topic offset requests).
+  - Emits `onProgress` and `onPartial` callbacks for progressive UI updates.
+  - Each topic row includes `messagesLoaded`, `offsetsPending`, `totalMessages`, and optional `offsetError`.
+- `loadTopicsMessageCounts(kafka, existingTopics, options)`
+  - Second phase: fetches low/high offsets per partition for topics already loaded via metadata.
+  - Uses bounded concurrency and optional worker-pool batching (`computeTopicMessagesBatch`).
+  - Updates rows incrementally via `onPartial`.
 - `getTopicOffsets(kafka, topic)`
   - Returns low/high offsets per partition.
 - `getClusterMetadata(kafka, configuredBrokers)`
@@ -173,9 +223,17 @@ Consumer:
   - Filtering, table rendering, and export (`json`, `jsonl`, `csv`).
 
 Topics browser:
-- `loadTopicsBrowser(forceRefresh)` -> `getTopicsAndPartitions()`
+- `loadTopicsBrowser(forceRefresh)` -> `getTopicsAndPartitions({ metadataOnly: true })` via `kafkaBridge`
+- `loadTopicsMessageCounts()` -> `loadTopicsMessageCounts()` via `kafkaBridge` (separate toolbar action)
+- `buildTopicMessageCountCell(t)` — renders Messages column state:
+  - **Not loaded** (`!messagesLoaded`): muted *Not loaded* label
+  - **Loading** (`offsetsPending`): spinner + *Loading…*
+  - **Loaded**: numeric count (`0` shown explicitly for empty topics)
+  - **Failed** (`offsetError`): red *Failed* with tooltip
+- `updateTopicsMessagesColumnChrome()` — updates column header (`Messages (not loaded)` / `Messages (loading…)` / `Messages`), hint banner, and button label (`Load message counts` / `↻ Reload message counts`)
 - `renderTopicsTable()` with quick actions:
   - jump to Producer / Consumer / Consumer lag for a topic.
+- Shared cancel via `cancelTopicsBrowserLoad()` for both Refresh and message-count loads.
 
 Consumer lag:
 - `loadConsumerLagOverview()` -> `getConsumerLagOverview()`
@@ -270,6 +328,29 @@ UI helpers:
 2. `getClusterMetadata()` gathers broker/controller/topic/group information.
 3. `buildTopicHealthSummary()` reports URP/no-leader/errors.
 
+### 5.6 Topics browser flow (phased loading)
+
+**Phase 1 — Refresh (metadata only)**
+1. User clicks **Refresh** on the Topics tab.
+2. Renderer calls `getTopicsAndPartitions(ctx, { metadataOnly: true, onProgress, onPartial, signal })` through `kafkaBridge`.
+3. Main process `handleGetTopics` runs `getTopicsAndPartitions` with `metadataOnly: true`.
+4. Topics appear quickly with partition count, replication factor, and leaders.
+5. Messages column shows *Not loaded*; hint banner explains counts are optional.
+
+**Phase 2 — Load message counts (optional)**
+1. User clicks **Load message counts** (or **↻ Reload message counts** after first load).
+2. Renderer calls `loadTopicsMessageCounts(ctx, topicsCache, { onProgress, onPartial, signal })`.
+3. Main process fetches low/high offsets per topic (bounded concurrency; worker pool for batch math).
+4. Rows update incrementally; per-row state transitions *Not loaded* → *Loading…* → number or *Failed*.
+5. Column header changes to `Messages (loading…)` then `Messages`; hint banner hides when complete.
+
+**Cancellation**
+- **Cancel** aborts the in-flight operation via `AbortController` + `kafka:cancel`.
+- Partial metadata or counts already received remain visible.
+
+**Message count meaning**
+- `totalMessages` ≈ sum over partitions of `(high watermark − low watermark)` — approximate retained messages, not all-time produced volume.
+
 ## 6) Operation to Libraries Matrix
 
 | Operation | Primary Methods | Libraries Used |
@@ -279,7 +360,8 @@ UI helpers:
 | Secure credential storage | IPC `kss-credentials:*`, `persistKafkaSecretsFromModal()` | `electron.safeStorage`, `fs` |
 | Produce message | `produceMessage()`, `withKafkaAuthRecovery()` | `kafkajs`, `electron` (IPC for secrets) |
 | Consume messages | `consumeMessages()`, `stopConsuming()` | `kafkajs` |
-| Topic browser | `getTopicsAndPartitions()`, `renderTopicsTable()` | `kafkajs` |
+| Topic browser (metadata) | `getTopicsAndPartitions({ metadataOnly: true })`, `renderTopicsTable()` | `kafkajs`, Electron IPC |
+| Topic message counts | `loadTopicsMessageCounts()`, `buildTopicMessageCountCell()` | `kafkajs`, worker threads, Electron IPC |
 | Consumer lag | `getConsumerLagOverview()` | `kafkajs` |
 | Offset reset | `resetConsumerGroupOffsetsToLatest()`, `appendOffsetResetAudit()` | `kafkajs`, `fs` |
 | Delete group | `deleteConsumerGroups()` | `kafkajs` |
@@ -322,10 +404,21 @@ UI helpers:
 - How are offset resets audited?
   - `appendOffsetResetAudit()` appends JSON lines with reason, user, env, and result.
 
+- Why does Refresh not show message counts?
+  - By design: offset fetches are one broker request per topic and can block for minutes on large MSK clusters. **Refresh** loads metadata only; **Load message counts** is a separate optional step.
+
+- What do Messages column states mean?
+  - *Not loaded* — metadata loaded, counts not requested. *Loading…* — offset fetch in progress. Number — retained message estimate. *Failed* — offset fetch error (see tooltip).
+
+- Why is Kafka in the main process?
+  - Keeps the renderer thread free for UI updates; progress and partial results stream over IPC (`kafka:progress`, `kafka:partial`).
+
 ---
 
 For code-level exploration, start with:
 - `renderer.js` (UI + orchestration)
+- `kafkaBridge.js` (renderer IPC)
+- `kafkaService.js` (main-process Kafka ops)
 - `backend/kafka.js` (Kafka operations)
 - `backend/kafkaConnection.js` (security/protocol config builder)
 - `main.js` (IPC + windows + secure storage handlers)

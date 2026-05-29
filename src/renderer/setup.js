@@ -3,8 +3,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const Ajv = require('ajv');
-const { probeClusterConnection, brokerListFromInput } = require('./src/backend/kafka');
+const { probeClusterConnection, brokerListFromInput } = require('./src/renderer/kafkaBridge');
 const { normalizeConnection } = require('./src/backend/kafkaConnection');
+const { createProgressTracker } = require('./src/renderer/progress');
 
 const THEME_STORAGE_KEY = 'kss-theme';
 const ENV_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -625,6 +626,7 @@ function renderEnvPanel() {
                 </div>
                 ${buildConnectionDetailsHtml(c, ps)}
                 <div class="probe-block">
+                    <div id="setupProbeProgressContainer" class="kss-progress-host"></div>
                     <div class="probe-row">
                         <button type="button" id="testConnBtn" class="btn btn-secondary"${probeInFlight ? ' disabled' : ''}>Test connection</button>
                         ${probeHtml}
@@ -706,10 +708,19 @@ function renderEnvPanel() {
         probeInFlight = true;
         renderEnvPanel();
         const secrets = buildProbeSecretsForTest(env);
-        const result = await probeClusterConnection(env.brokersText, {
-            connection: normalizeConnection(env.connection),
-            secrets,
-        });
+        const probeProgress = createProgressTracker('setupProbeProgressContainer');
+        probeProgress.show('Testing connection…');
+        let result;
+        try {
+            result = await probeClusterConnection(env.brokersText, {
+                connection: normalizeConnection(env.connection),
+                secrets,
+            }, {
+                onProgress: (p) => probeProgress.update(p),
+            });
+        } finally {
+            probeProgress.hide();
+        }
         probeInFlight = false;
         env.probeResult = result;
         if (!result.ok) {

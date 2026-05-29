@@ -1,19 +1,24 @@
 const { ipcRenderer } = require('electron');
+const kafkaBridge = require('./src/renderer/kafkaBridge');
 const {
-    createKafkaClient,
     produceMessage,
     disconnectProducer,
     stopConsuming,
     consumeMessages,
     getTopicsAndPartitions,
+    loadTopicsMessageCounts: fetchTopicsMessageCounts,
     getTopicOffsets,
     getConsumerLagOverview,
     resetConsumerGroupOffsetsToLatest,
     deleteConsumerGroups,
     appendOffsetResetAudit,
     getClusterMetadata,
-} = require('./src/backend/kafka');
-const { normalizeConnection, connectionFingerprint, isKafkaAuthError } = require('./src/backend/kafkaConnection');
+    pingKafkaAuth,
+    invalidateCache: invalidateKafkaBridgeCache,
+    isKafkaAuthError,
+} = kafkaBridge;
+const { normalizeConnection } = require('./src/backend/kafkaConnection');
+const { createProgressTracker, globalProgress } = require('./src/renderer/progress');
 const templatesApi = require('./src/backend/templates');
 const { expandTokens, TOKEN_INSERT_OPTIONS } = require('./src/backend/randomTokens');
 const path = require('path');
@@ -102,11 +107,17 @@ let consumerGroup = DEFAULT_GROUP;
 let topicsCache = [];
 let topicsLoadController = null;
 let topicsLoadSeq = 0;
+let topicsLoadState = 'idle';
+let topicsLoadedOnce = false;
+let topicsMessageLoadState = 'idle';
+let topicsMessagesLoadedOnce = false;
+let topicsProgressTracker = null;
+let topicsSearchDebounceTimer = null;
+let topicsRenderFrame = null;
 let consumedMessages = [];
 let selectedTemplateId = '';
 let producerFormat = DEFAULT_FORMAT;
 let consumerFormat = DEFAULT_FORMAT;
-let kafkaClientCache = { key: null, client: null };
 /** Session-only credential fields per env (override encrypted store). */
 let sessionSecretsByEnv = {};
 /** Bumped when secrets change so the Kafka client is rebuilt. */
@@ -237,12 +248,19 @@ function persistLastEnv(envId) {
     savePreferences(prefs);
 }
 
-function invalidateKafkaClientCache() {
-    const prev = kafkaClientCache.client;
-    kafkaClientCache = { key: null, client: null };
-    if (prev) {
-        disconnectProducer(prev).catch((err) => logDebug('disconnectProducer', err));
+function invalidateKafkaClientCache(envId) {
+    invalidateKafkaBridgeCache(envId || activeEnv).catch((err) => logDebug('invalidateKafkaBridgeCache', err));
+}
+
+async function getKafkaCtx() {
+    const env = envConfig[activeEnv];
+    if (!env) {
+        throw new Error('No environment selected');
     }
+    const connection = normalizeConnection(env.connection);
+    const secrets = await mergeKafkaSecretsForEnv(activeEnv);
+    const epoch = secretEpochByEnv[activeEnv] || 0;
+    return kafkaBridge.buildCtx(activeEnv, env.brokers, connection, secrets, epoch);
 }
 
 function bumpSecretEpoch(envId) {
@@ -273,21 +291,25 @@ function hasAnyKafkaSecret(secrets) {
 }
 
 async function getKafkaClient() {
-    const env = envConfig[activeEnv];
-    if (!env) {
-        throw new Error('No environment selected');
+    return getKafkaCtx();
+}
+
+/**
+ * Run a Kafka operation; on auth/TLS failure prompt for secrets and retry (bounded).
+ * @param {string} topicLabel
+ * @param {(ctx: object) => Promise<unknown>} fn
+ */
+async function withKafkaAuthRecovery(topicLabel, fn) {
+    const maxRounds = 3;
+    for (let round = 0; round < maxRounds; round += 1) {
+        try {
+            const ctx = await getKafkaCtx();
+            return await fn(ctx);
+        } catch (err) {
+            await recoverKafkaAuthError(topicLabel, err);
+        }
     }
-    const connection = normalizeConnection(env.connection);
-    const secrets = await mergeKafkaSecretsForEnv(activeEnv);
-    const hasSecret = hasAnyKafkaSecret(secrets);
-    const epoch = secretEpochByEnv[activeEnv] || 0;
-    const fp = `${activeEnv}|${epoch}|${connectionFingerprint(connection, env.brokers, hasSecret)}`;
-    if (kafkaClientCache.key === fp && kafkaClientCache.client) {
-        return kafkaClientCache.client;
-    }
-    const client = createKafkaClient(env.brokers, { connection, secrets });
-    kafkaClientCache = { key: fp, client };
-    return client;
+    throw new Error('Kafka authentication failed after multiple attempts.');
 }
 
 /**
@@ -453,42 +475,6 @@ async function recoverKafkaAuthError(topicLabel, err) {
     await persistKafkaSecretsFromModal(activeEnv, form, form.remember);
     bumpSecretEpoch(activeEnv);
     invalidateKafkaClientCache();
-}
-
-/**
- * Run a Kafka operation; on auth/TLS failure prompt for secrets and retry (bounded).
- * @param {string} topicLabel
- * @param {(kafka: import('kafkajs').Kafka) => Promise<unknown>} fn
- */
-async function withKafkaAuthRecovery(topicLabel, fn) {
-    const maxRounds = 3;
-    for (let round = 0; round < maxRounds; round += 1) {
-        try {
-            const kafka = await getKafkaClient();
-            return await fn(kafka);
-        } catch (err) {
-            await recoverKafkaAuthError(topicLabel, err);
-        }
-    }
-    throw new Error('Kafka authentication failed after multiple attempts.');
-}
-
-async function disconnectAdminQuiet(admin) {
-    try {
-        await admin.disconnect();
-    } catch (err) {
-        logDebug('admin.disconnect', err);
-    }
-}
-
-/** Minimal broker auth check (SASL/TLS) before starting a long-lived consumer. */
-async function pingKafkaAuth(kafka) {
-    const admin = kafka.admin();
-    try {
-        await admin.connect();
-    } finally {
-        await disconnectAdminQuiet(admin);
-    }
 }
 
 function applyTheme(theme) {
@@ -953,15 +939,19 @@ function decodeHeaderValue(v) {
     if (v == null) return '';
     if (typeof Buffer !== 'undefined' && Buffer.isBuffer(v)) return v.toString('utf8');
     if (v instanceof Uint8Array) return Buffer.from(v).toString('utf8');
-    if (typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+    if (typeof v === 'object' && v !== null && v.type === 'Buffer' && Array.isArray(v.data)) {
         return Buffer.from(v.data).toString('utf8');
     }
+    if (Array.isArray(v)) {
+        return v.map(decodeHeaderValue).filter((s) => s !== '').join(' | ');
+    }
+    if (typeof v === 'string') return v;
     return String(v);
 }
 
 function normalizeHeaders(headers) {
     const out = {};
-    if (!headers || typeof headers !== 'object') return out;
+    if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return out;
     for (const [k, v] of Object.entries(headers)) {
         out[k] = decodeHeaderValue(v);
     }
@@ -1034,6 +1024,56 @@ function formatPayloadForViewer(raw, formatId) {
 
 const PAYLOAD_VIEWER_STORAGE_KEY = 'kssPayloadViewer';
 
+function openConsumerMessageRawEventWindow(msg) {
+    if (!msg) return;
+    const theme = document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    const record = {
+        topic: msg.topic,
+        partition: msg.partition,
+        offset: msg.offset,
+        timestamp: msg.timestamp,
+        key: msg.key,
+        headers: normalizeHeaders(msg.headers || {}),
+        value: msg.value != null ? String(msg.value) : '',
+    };
+    let text;
+    try {
+        text = JSON.stringify(record, null, 2);
+    } catch (err) {
+        logDebug('raw event JSON.stringify', err);
+        showAlert('Raw event', 'Could not serialize this message.');
+        return;
+    }
+    try {
+        sessionStorage.setItem(PAYLOAD_VIEWER_STORAGE_KEY, JSON.stringify({
+            text,
+            theme,
+            formatId: 'json',
+            pageTitle: 'Raw event',
+        }));
+    } catch (err) {
+        logDebug('sessionStorage set raw event', err);
+        showAlert('Raw event', 'Could not store data for the viewer (too large or storage unavailable).');
+        return;
+    }
+    let url;
+    try {
+        url = new URL('payload-viewer.html', window.location.href).href;
+    } catch (err) {
+        logDebug('payload-viewer URL', err);
+        url = 'payload-viewer.html';
+    }
+    const w = window.open(url, '_blank', 'width=920,height=720,scrollbars=yes');
+    if (!w) {
+        try {
+            sessionStorage.removeItem(PAYLOAD_VIEWER_STORAGE_KEY);
+        } catch (e2) {
+            logDebug('sessionStorage remove raw viewer key', e2);
+        }
+        showAlert('Raw event', 'Could not open a new window (popup blocker or OS restriction).');
+    }
+}
+
 function openConsumerMessagePayloadWindow(msg) {
     if (!msg) return;
     const raw = msg.value != null ? String(msg.value) : '';
@@ -1045,6 +1085,7 @@ function openConsumerMessagePayloadWindow(msg) {
             text: display,
             theme,
             formatId: fmtId,
+            pageTitle: '',
         }));
     } catch (err) {
         logDebug('sessionStorage set viewer payload', err);
@@ -1074,15 +1115,21 @@ function wireConsumerTablePayloadViewer() {
     if (!wrap || consumerTablePayloadClickBound) return;
     consumerTablePayloadClickBound = true;
     wrap.addEventListener('click', (e) => {
+        const rawBtn = e.target.closest('.consumer-view-raw-event-btn');
         const btn = e.target.closest('.consumer-view-payload-btn');
         const valueCell = e.target.closest('.consumer-msg-value-cell--openable');
-        if (!btn && !valueCell) return;
-        const tr = (btn || valueCell).closest('tr');
+        if (!rawBtn && !btn && !valueCell) return;
+        const tr = (rawBtn || btn || valueCell).closest('tr');
         if (!tr || tr.querySelector('.consumer-msg-empty')) return;
         const idx = parseInt(tr.getAttribute('data-msg-index') || '', 10);
         if (!Number.isFinite(idx)) return;
         const msg = lastConsumerTableFilteredSnapshot[idx];
         if (!msg) return;
+        if (rawBtn) {
+            e.preventDefault();
+            openConsumerMessageRawEventWindow(msg);
+            return;
+        }
         const val = msg.value != null ? String(msg.value) : '';
         if (!val) return;
         if (btn) e.preventDefault();
@@ -1134,12 +1181,12 @@ function renderConsumerTable(filtered) {
     lastConsumerTableFilteredSnapshot = filtered.slice();
 
     const headerKeys = collectHeaderKeysFromMessages(filtered);
-    const fixedTh = ['Par', 'Offset', 'Timestamp', 'Key', 'Value'].map((label) => `<th>${escapeHtml(label)}</th>`).join('');
+    const fixedTh = ['Par', 'Offset', 'Timestamp', 'Key', 'Value', 'Actions'].map((label) => `<th>${escapeHtml(label)}</th>`).join('');
     const dynTh = headerKeys.map((k) => `<th>${escapeHtml(k)}</th>`).join('');
     thead.innerHTML = `<tr>${fixedTh}${dynTh}</tr>`;
 
     if (filtered.length === 0) {
-        const colSpan = 5 + headerKeys.length;
+        const colSpan = 6 + headerKeys.length;
         tbody.innerHTML = `<tr><td class="consumer-msg-empty" colspan="${colSpan}">No messages yet.</td></tr>`;
         return;
     }
@@ -1173,16 +1220,19 @@ function renderConsumerTable(filtered) {
         const valueCellAttrs = valueHasContent
             ? ` class="consumer-msg-value-cell consumer-msg-value-cell--openable" tabindex="0" role="button" aria-label="Open full payload in new window"${valueTitleAttr}`
             : ' class="consumer-msg-value-cell"';
-        const viewBtn = valueHasContent && valDisp.truncated
-            ? '<button type="button" class="consumer-view-payload-btn btn-secondary" title="Open full payload in new window">View</button>'
-            : '';
-        const valueInner = `<span class="consumer-msg-value-preview">${valDisp.html || '—'}</span>${viewBtn}`;
+        const valueInner = `<span class="consumer-msg-value-preview">${valDisp.html || '—'}</span>`;
+        const viewDisabled = valueHasContent ? '' : ' disabled';
+        const viewTitle = valueHasContent ? 'Open full payload in new window' : 'No payload';
+        const actionCells = `<td class="consumer-msg-actions-cell">
+            <button type="button" class="consumer-view-payload-btn btn-secondary"${viewDisabled} title="${escapeHtml(viewTitle)}">View</button>
+            <button type="button" class="consumer-view-raw-event-btn btn-secondary" title="Open full record (topic, offsets, every header, payload) as JSON">Raw event</button>
+        </td>`;
         const fixedCells = `
             <td>${escapeHtml(String(m.partition))}</td>
             <td>${escapeHtml(String(m.offset))}</td>
             <td class="consumer-msg-ts-cell">${escapeHtml(ts)}</td>
             <td${keyTitle}>${keyDisp.html}</td>
-            <td${valueCellAttrs}>${valueInner}</td>`;
+            <td${valueCellAttrs}>${valueInner}</td>${actionCells}`;
         const dynCells = headerKeys.map((hk) => {
             const raw = h[hk] != null && h[hk] !== '' ? String(h[hk]) : '—';
             const d = trunc(raw === '—' ? '—' : raw, maxCellOther);
@@ -1199,6 +1249,15 @@ function renderConsumerTable(filtered) {
     }
 }
 
+function formatHeaderSummaryLine(msg) {
+    const h = normalizeHeaders(msg.headers || {});
+    const parts = Object.entries(h)
+        .filter(([, val]) => val != null && String(val) !== '')
+        .map(([k, val]) => `${k}=${String(val).replace(/\r?\n/g, '\\n')}`);
+    if (parts.length === 0) return '';
+    return `headers: ${parts.join('; ')}`;
+}
+
 function formatConsumedEntry(msg) {
     let body = msg.value;
     if (consumerFormat === 'json') {
@@ -1208,8 +1267,10 @@ function formatConsumedEntry(msg) {
             logDebug('format consumed json', err);
         }
     }
+    const headerSummary = formatHeaderSummaryLine(msg);
     const metaLine = `partition=${msg.partition} offset=${msg.offset} ts=${msg.timestamp}` +
-        (msg.key ? ` key=${msg.key}` : '');
+        (msg.key ? ` key=${msg.key}` : '') +
+        (headerSummary ? ` ${headerSummary}` : '');
     let meta;
     if (consumerFormat === 'xml') {
         meta = `<!-- ${metaLine} -->`;
@@ -1653,9 +1714,14 @@ async function refreshPartitions(topicName) {
     allOpt.textContent = 'All partitions';
     select.appendChild(allOpt);
     if (!topicName || !envConfig || !envConfig[activeEnv]) return;
+
+    const partitionProgress = createProgressTracker('partitionProgressContainer');
+    partitionProgress.show('Loading partitions…');
     try {
-        await withKafkaAuthRecovery(topicName || '', async (kafka) => {
-            const offsets = await getTopicOffsets(kafka, topicName);
+        await withKafkaAuthRecovery(topicName || '', async (ctx) => {
+            const offsets = await getTopicOffsets(ctx, topicName, {
+                onProgress: (p) => partitionProgress.update(p),
+            });
             offsets
                 .sort((a, b) => Number(a.partition) - Number(b.partition))
                 .forEach((o) => {
@@ -1667,6 +1733,8 @@ async function refreshPartitions(topicName) {
         });
     } catch (err) {
         console.warn('Could not load partitions for topic', topicName, err);
+    } finally {
+        partitionProgress.hide();
     }
 }
 
@@ -1678,29 +1746,76 @@ async function loadTopicsBrowser(forceRefresh = false) {
         return;
     }
     cancelTopicsBrowserLoad('');
+    topicsMessagesLoadedOnce = false;
+    topicsMessageLoadState = 'idle';
     const controller = new AbortController();
     const loadSeq = startTopicsBrowserLoad(controller);
+    const previousCache = topicsCache.slice();
     try {
-        await fetchTopicsBrowserData(controller);
+        await fetchTopicsBrowserData(controller, loadSeq);
         if (isStaleTopicsBrowserLoad(loadSeq, controller)) return;
+        topicsLoadState = 'loaded';
+        topicsLoadedOnce = true;
+        topicsMessageLoadState = 'idle';
+        topicsMessagesLoadedOnce = false;
+        clearTopicsWarningBanner();
         renderTopicsBrowserResults();
     } catch (err) {
+        if (loadSeq === topicsLoadSeq && !isAbortError(err)) {
+            if (previousCache.length > 0) {
+                topicsCache = previousCache;
+                topicsLoadState = 'error';
+                showTopicsWarningBanner(`Refresh failed: ${err.message}. Showing previous results.`);
+                renderTopicsBrowserResults();
+            }
+        }
         handleTopicsBrowserLoadError(loadSeq, err);
     } finally {
         finishTopicsBrowserLoad(loadSeq);
     }
 }
 
+function showTopicsWarningBanner(message) {
+    const banner = document.getElementById('topicsWarningBanner');
+    if (!banner) return;
+    banner.textContent = message;
+    banner.hidden = false;
+}
+
+function clearTopicsWarningBanner() {
+    const banner = document.getElementById('topicsWarningBanner');
+    if (!banner) return;
+    banner.textContent = '';
+    banner.hidden = true;
+}
+
 function startTopicsBrowserLoad(controller) {
     topicsLoadSeq += 1;
     topicsLoadController = controller;
-    setTopicsBrowserLoadingState(true, 'Loading topics and partition offsets…');
+    topicsLoadState = 'loading';
+    if (topicsProgressTracker) topicsProgressTracker.hide();
+    topicsProgressTracker = createProgressTracker('topicsProgressContainer');
+    topicsProgressTracker.show('Loading topics…');
+    setTopicsBrowserLoadingState(true, 'Loading topics…');
     return topicsLoadSeq;
 }
 
-async function fetchTopicsBrowserData(controller) {
-    await withKafkaAuthRecovery('', async (kafka) => {
-        topicsCache = await getTopicsAndPartitions(kafka, { signal: controller.signal });
+async function fetchTopicsBrowserData(controller, loadSeq) {
+    await withKafkaAuthRecovery('', async (ctx) => {
+        topicsCache = await getTopicsAndPartitions(ctx, {
+            metadataOnly: true,
+            signal: controller.signal,
+            onProgress: (p) => {
+                if (isStaleTopicsBrowserLoad(loadSeq, controller)) return;
+                if (topicsProgressTracker) topicsProgressTracker.update(p);
+                syncTopicsBrowserActionState(p.message || 'Loading topics…');
+            },
+            onPartial: (partialTopics) => {
+                if (isStaleTopicsBrowserLoad(loadSeq, controller)) return;
+                topicsCache = partialTopics;
+                renderTopicsBrowserResults();
+            },
+        });
     });
 }
 
@@ -1712,13 +1827,61 @@ function renderTopicsBrowserResults() {
     const empty = document.getElementById('topicsEmptyState');
     const countEl = document.getElementById('topicsCount');
     renderTopicsTable();
+    updateTopicsMessagesColumnChrome();
     if (countEl) countEl.textContent = `${topicsCache.length} topic${topicsCache.length === 1 ? '' : 's'}`;
-    if (empty) empty.style.display = topicsCache.length === 0 ? 'block' : 'none';
+    updateTopicsEmptyState(empty);
+}
+
+// eslint-disable-next-line sonarjs/cognitive-complexity -- distinct empty states for topics tab
+function updateTopicsEmptyState(empty) {
+    if (!empty) return;
+    const searchInput = document.getElementById('topicsSearchInput');
+    const term = (searchInput && searchInput.value || '').trim().toLowerCase();
+    const filteredCount = term
+        ? topicsCache.filter((t) => t.name.toLowerCase().includes(term)).length
+        : topicsCache.length;
+
+    if (topicsLoadState === 'loading') {
+        empty.textContent = 'Loading topics…';
+        empty.style.display = topicsCache.length === 0 ? 'block' : 'none';
+        return;
+    }
+
+    if (topicsMessageLoadState === 'loading') {
+        empty.textContent = topicsCache.length > 0
+            ? `Loading message counts for ${topicsCache.length} topics…`
+            : 'Loading message counts…';
+        empty.style.display = topicsCache.length === 0 ? 'block' : 'none';
+        return;
+    }
+
+    if (topicsCache.length > 0 && !topicsMessagesLoadedOnce && !topicsCache.some((t) => t.messagesLoaded)) {
+        empty.style.display = 'none';
+        return;
+    }
+
+    if (filteredCount === 0 && topicsCache.length > 0 && term) {
+        empty.textContent = 'No topics match filter.';
+        empty.style.display = 'block';
+        return;
+    }
+
+    if (topicsCache.length === 0) {
+        empty.style.display = 'block';
+        if (topicsLoadedOnce) {
+            empty.textContent = 'No user topics in cluster.';
+        } else {
+            empty.textContent = 'No topics loaded. Click Refresh to load.';
+        }
+        return;
+    }
+
+    empty.style.display = 'none';
 }
 
 function handleTopicsBrowserLoadError(loadSeq, err) {
     if (loadSeq !== topicsLoadSeq || isAbortError(err)) {
-        setTopicsBrowserLoadingState(false, 'Topic loading cancelled.');
+        syncTopicsBrowserActionState('Topic loading cancelled.');
         return;
     }
     showAlert('Failed to load topics', err.message);
@@ -1727,7 +1890,14 @@ function handleTopicsBrowserLoadError(loadSeq, err) {
 function finishTopicsBrowserLoad(loadSeq) {
     if (loadSeq === topicsLoadSeq) {
         topicsLoadController = null;
-        setTopicsBrowserLoadingState(false, '');
+        if (topicsLoadState === 'loading') {
+            topicsLoadState = topicsCache.length > 0 ? 'loaded' : 'idle';
+        }
+        syncTopicsBrowserActionState('');
+        if (topicsProgressTracker) {
+            topicsProgressTracker.hide();
+            topicsProgressTracker = null;
+        }
     }
 }
 
@@ -1740,29 +1910,218 @@ function isAbortError(err) {
 
 function setTopicsBrowserLoadingState(isLoading, message) {
     const refreshBtn = document.getElementById('refreshTopicsButton');
+    const countsBtn = document.getElementById('loadTopicCountsButton');
     const cancelBtn = document.getElementById('cancelTopicsButton');
     const status = document.getElementById('topicsStatus');
     const empty = document.getElementById('topicsEmptyState');
-    if (refreshBtn) refreshBtn.disabled = isLoading;
-    if (cancelBtn) cancelBtn.hidden = !isLoading;
-    if (status) status.textContent = message || '';
-    if (empty && isLoading && topicsCache.length === 0) {
-        empty.textContent = message || 'Loading topics…';
-        empty.style.display = 'block';
-    } else if (empty && !isLoading && topicsCache.length === 0) {
-        empty.textContent = 'No topics loaded. Click Refresh to load.';
+    const topicsBusy = topicsLoadState === 'loading';
+    const countsBusy = topicsMessageLoadState === 'loading';
+    if (refreshBtn) refreshBtn.disabled = topicsBusy;
+    if (countsBtn) {
+        countsBtn.disabled = topicsBusy || countsBusy || topicsCache.length === 0;
     }
+    if (cancelBtn) cancelBtn.hidden = !(topicsBusy || countsBusy);
+    if (status) status.textContent = message || '';
+    if (empty) updateTopicsEmptyState(empty);
+    updateTopicsMessagesColumnChrome();
+}
+
+function syncTopicsBrowserActionState(message) {
+    setTopicsBrowserLoadingState(
+        topicsLoadState === 'loading' || topicsMessageLoadState === 'loading',
+        message || '',
+    );
 }
 
 function cancelTopicsBrowserLoad(message) {
     if (!topicsLoadController) {
-        if (message !== undefined) setTopicsBrowserLoadingState(false, message);
+        if (message !== undefined) syncTopicsBrowserActionState(message);
         return;
     }
     topicsLoadSeq += 1;
     topicsLoadController.abort();
     topicsLoadController = null;
-    setTopicsBrowserLoadingState(false, message || 'Topic loading cancelled.');
+    topicsLoadState = topicsCache.length > 0 ? 'loaded' : 'idle';
+    topicsMessageLoadState = topicsMessagesLoadedOnce ? 'loaded' : 'idle';
+    if (topicsProgressTracker) {
+        topicsProgressTracker.hide();
+        topicsProgressTracker = null;
+    }
+    syncTopicsBrowserActionState(message || 'Loading cancelled.');
+}
+
+function startTopicsMessageCountsLoad(controller) {
+    topicsLoadSeq += 1;
+    topicsLoadController = controller;
+    topicsMessageLoadState = 'loading';
+    if (topicsProgressTracker) topicsProgressTracker.hide();
+    topicsProgressTracker = createProgressTracker('topicsProgressContainer');
+    topicsProgressTracker.show('Loading message counts…');
+    syncTopicsBrowserActionState('Loading message counts…');
+    return topicsLoadSeq;
+}
+
+function finishTopicsMessageCountsLoad(loadSeq) {
+    if (loadSeq === topicsLoadSeq) {
+        topicsLoadController = null;
+        if (topicsMessageLoadState === 'loading') {
+            topicsMessageLoadState = topicsMessagesLoadedOnce ? 'loaded' : 'idle';
+        }
+        syncTopicsBrowserActionState('');
+        if (topicsProgressTracker) {
+            topicsProgressTracker.hide();
+            topicsProgressTracker = null;
+        }
+    }
+}
+
+async function loadTopicsMessageCounts() {
+    if (topicsCache.length === 0) {
+        showAlert('Message counts', 'Load topics first (Refresh), then load message counts.');
+        return;
+    }
+    if (topicsMessageLoadState === 'loading' || topicsLoadState === 'loading') return;
+
+    cancelTopicsBrowserLoad('');
+    const controller = new AbortController();
+    const loadSeq = startTopicsMessageCountsLoad(controller);
+    const previousCache = topicsCache.slice();
+    try {
+        await withKafkaAuthRecovery('', async (ctx) => {
+            topicsCache = await fetchTopicsMessageCounts(ctx, previousCache, {
+                signal: controller.signal,
+                onProgress: (p) => {
+                    if (isStaleTopicsBrowserLoad(loadSeq, controller)) return;
+                    if (topicsProgressTracker) topicsProgressTracker.update(p);
+                    syncTopicsBrowserActionState(p.message || 'Loading message counts…');
+                },
+                onPartial: (partialTopics) => {
+                    if (isStaleTopicsBrowserLoad(loadSeq, controller)) return;
+                    topicsCache = partialTopics;
+                    renderTopicsBrowserResults();
+                },
+            });
+        });
+        if (isStaleTopicsBrowserLoad(loadSeq, controller)) return;
+        topicsMessageLoadState = 'loaded';
+        topicsMessagesLoadedOnce = true;
+        renderTopicsBrowserResults();
+    } catch (err) {
+        if (loadSeq === topicsLoadSeq && !isAbortError(err)) {
+            topicsCache = previousCache;
+            showAlert('Failed to load message counts', err.message);
+        } else if (isAbortError(err)) {
+            syncTopicsBrowserActionState('Message count loading cancelled.');
+        }
+    } finally {
+        finishTopicsMessageCountsLoad(loadSeq);
+    }
+}
+
+function buildTopicMessageCountCell(t) {
+    if (t.offsetsPending) {
+        return {
+            html: '<span class="topics-msg-count topics-msg-count--loading"><span class="topics-msg-spinner" aria-hidden="true"></span>Loading…</span>',
+            title: 'Fetching message count for this topic',
+            ariaLabel: 'Message count loading',
+        };
+    }
+    if (!t.messagesLoaded) {
+        return {
+            html: '<span class="topics-msg-count topics-msg-count--pending">Not loaded</span>',
+            title: 'Click "Load message counts" in the toolbar to fetch counts for all topics',
+            ariaLabel: 'Message count not loaded',
+        };
+    }
+    if (t.offsetError) {
+        return {
+            html: '<span class="topics-msg-count topics-msg-count--error">Failed</span>',
+            title: `Could not load message count: ${t.offsetError}`,
+            ariaLabel: 'Message count failed to load',
+        };
+    }
+    const count = t.totalMessages != null ? Number(t.totalMessages) : 0;
+    const countClass = count === 0 ? 'topics-msg-count--empty' : 'topics-msg-count--value';
+    const countLabel = count === 1 ? '1 message' : `${count} messages`;
+    return {
+        html: `<span class="topics-msg-count ${countClass}">${escapeHtml(String(count))}</span>`,
+        title: `${countLabel} retained in topic (high watermark − low watermark)`,
+        ariaLabel: countLabel,
+    };
+}
+
+function updateTopicsMessagesColumnChrome() {
+    const header = document.getElementById('topicsMessagesHeader');
+    const hint = document.getElementById('topicsMessageCountsHint');
+    const countsBtn = document.getElementById('loadTopicCountsButton');
+    const hasTopics = topicsCache.length > 0;
+    const countsLoading = topicsMessageLoadState === 'loading';
+    const countsLoaded = topicsMessagesLoadedOnce
+        || (hasTopics && topicsCache.every((t) => t.messagesLoaded && !t.offsetsPending));
+
+    if (header) {
+        if (countsLoading) {
+            header.textContent = 'Messages (loading…)';
+            header.title = 'Message counts are being fetched from the cluster';
+        } else if (countsLoaded) {
+            header.textContent = 'Messages';
+            header.title = 'Approximate retained messages per topic';
+        } else if (hasTopics) {
+            header.textContent = 'Messages (not loaded)';
+            header.title = 'Counts are optional — use Load message counts in the toolbar';
+        } else {
+            header.textContent = 'Messages';
+            header.title = 'Approximate retained messages per topic (load separately)';
+        }
+    }
+
+    if (hint) {
+        hint.hidden = !hasTopics || countsLoaded || countsLoading;
+    }
+
+    if (countsBtn && hasTopics) {
+        if (countsLoaded) {
+            countsBtn.textContent = '↻ Reload message counts';
+        } else {
+            countsBtn.textContent = 'Load message counts';
+        }
+    }
+}
+
+function buildTopicTableRow(t) {
+    const tr = document.createElement('tr');
+    const leaders = t.partitions
+        .map((p) => `${p.partitionId}→${p.leader}`)
+        .join(', ');
+    const msgCell = buildTopicMessageCountCell(t);
+    tr.innerHTML = `
+        <td class="topic-cell">${escapeHtml(t.name)}</td>
+        <td>${t.partitionCount}</td>
+        <td>${t.replicationFactor}</td>
+        <td class="leaders-cell" title="${escapeHtml(leaders)}">${escapeHtml(leaders)}</td>
+        <td class="topics-messages-col" title="${escapeHtml(msgCell.title)}" aria-label="${escapeHtml(msgCell.ariaLabel)}">${msgCell.html}</td>
+        <td class="actions-cell">
+            <button class="btn-secondary" data-action="produce">Producer</button>
+            <button class="btn-secondary" data-action="consume">Consumer</button>
+            <button class="btn-secondary" data-action="lag" title="Open Consumer lag for this topic">Lag</button>
+        </td>
+    `;
+    const produceBtn = tr.querySelector('[data-action="produce"]');
+    if (produceBtn) {
+        produceBtn.addEventListener('click', () => {
+            useTopic(t.name, 'producer');
+        });
+    }
+    const consumeBtn = tr.querySelector('[data-action="consume"]');
+    if (consumeBtn) {
+        consumeBtn.addEventListener('click', () => {
+            useTopic(t.name, 'consumer');
+        });
+    }
+    tr.querySelector('[data-action="lag"]').addEventListener('click', () => {
+        navigateToConsumerLag(t.name);
+    });
+    return tr;
 }
 
 function renderTopicsTable() {
@@ -1774,41 +2133,46 @@ function renderTopicsTable() {
         ? topicsCache.filter((t) => t.name.toLowerCase().includes(term))
         : topicsCache;
 
+    if (topicsRenderFrame) {
+        cancelAnimationFrame(topicsRenderFrame);
+        topicsRenderFrame = null;
+    }
+
     tbody.innerHTML = '';
-    filtered.forEach((t) => {
-        const tr = document.createElement('tr');
-        const leaders = t.partitions
-            .map((p) => `${p.partitionId}→${p.leader}`)
-            .join(', ');
-        tr.innerHTML = `
-            <td class="topic-cell">${escapeHtml(t.name)}</td>
-            <td>${t.partitionCount}</td>
-            <td>${t.replicationFactor}</td>
-            <td class="leaders-cell" title="${escapeHtml(leaders)}">${escapeHtml(leaders)}</td>
-            <td>${t.totalMessages}</td>
-            <td class="actions-cell">
-                <button class="btn-secondary" data-action="produce">Producer</button>
-                <button class="btn-secondary" data-action="consume">Consumer</button>
-                <button class="btn-secondary" data-action="lag" title="Open Consumer lag for this topic">Lag</button>
-            </td>
-        `;
-        const produceBtn = tr.querySelector('[data-action="produce"]');
-        if (produceBtn) {
-            produceBtn.addEventListener('click', () => {
-                useTopic(t.name, 'producer');
-            });
+    const empty = document.getElementById('topicsEmptyState');
+    updateTopicsEmptyState(empty);
+
+    if (filtered.length === 0) return;
+
+    const BATCH_SIZE = 50;
+    if (filtered.length <= BATCH_SIZE) {
+        filtered.forEach((t) => tbody.appendChild(buildTopicTableRow(t)));
+        return;
+    }
+
+    let index = 0;
+    function renderBatch() {
+        const end = Math.min(index + BATCH_SIZE, filtered.length);
+        for (; index < end; index += 1) {
+            tbody.appendChild(buildTopicTableRow(filtered[index]));
         }
-        const consumeBtn = tr.querySelector('[data-action="consume"]');
-        if (consumeBtn) {
-            consumeBtn.addEventListener('click', () => {
-                useTopic(t.name, 'consumer');
-            });
+        if (index < filtered.length) {
+            topicsRenderFrame = requestAnimationFrame(renderBatch);
+        } else {
+            topicsRenderFrame = null;
         }
-        tr.querySelector('[data-action="lag"]').addEventListener('click', () => {
-            navigateToConsumerLag(t.name);
-        });
-        tbody.appendChild(tr);
-    });
+    }
+    renderBatch();
+}
+
+function debouncedRenderTopicsTable() {
+    if (topicsSearchDebounceTimer) {
+        clearTimeout(topicsSearchDebounceTimer);
+    }
+    topicsSearchDebounceTimer = setTimeout(() => {
+        topicsSearchDebounceTimer = null;
+        renderTopicsTable();
+    }, 150);
 }
 
 function escapeHtml(str) {
@@ -1894,10 +2258,13 @@ async function handleLagDelete(groupId) {
 
     lagResetInFlight = true;
     setLagResetControlsState();
-    showLoading();
+    const opProgress = createProgressTracker('lagProgressContainer');
+    opProgress.show('Deleting consumer group…');
     try {
-        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
-            deleteConsumerGroups(kafka, { groupIds: [groupId] }));
+        const details = await withKafkaAuthRecovery(topic || '', async (ctx) =>
+            deleteConsumerGroups(ctx, { groupIds: [groupId] }, {
+                onProgress: (p) => opProgress.update(p),
+            }));
         if (details.failureCount === 0) {
             showAlert('Consumer group deleted', 'Deleted 1 group.');
         } else {
@@ -1909,7 +2276,7 @@ async function handleLagDelete(groupId) {
         showAlert('Delete consumer group failed', err.message || String(err));
     } finally {
         lagResetInFlight = false;
-        hideLoading();
+        opProgress.hide();
         setLagResetControlsState();
     }
 }
@@ -1945,10 +2312,13 @@ async function handleLagReset(groupId) {
 
     lagResetInFlight = true;
     setLagResetControlsState();
-    showLoading();
+    const opProgress = createProgressTracker('lagProgressContainer');
+    opProgress.show('Resetting offsets…');
     try {
-        const details = await withKafkaAuthRecovery(topic || '', async (kafka) =>
-            resetConsumerGroupOffsetsToLatest(kafka, { topic, groupId }));
+        const details = await withKafkaAuthRecovery(topic || '', async (ctx) =>
+            resetConsumerGroupOffsetsToLatest(ctx, { topic, groupId }, {
+                onProgress: (p) => opProgress.update(p),
+            }));
         showAlert('Offset reset', `Reset offsets to latest for "${groupId}" on "${topic}".`);
 
         try {
@@ -1971,7 +2341,7 @@ async function handleLagReset(groupId) {
         showAlert('Offset reset failed', err.message || String(err));
     } finally {
         lagResetInFlight = false;
-        hideLoading();
+        opProgress.hide();
         setLagResetControlsState();
     }
 }
@@ -2106,6 +2476,8 @@ function renderLagOverviewResult(data) {
     setLagResetControlsState();
 }
 
+let lagProgress = null;
+
 async function loadConsumerLagOverview() {
     if (!lagTopic) {
         showAlert('Consumer lag', 'Please select a topic.');
@@ -2113,16 +2485,25 @@ async function loadConsumerLagOverview() {
     }
     const status = document.getElementById('lagStatus');
     if (status) status.textContent = 'Loading…';
-    showLoading();
+    if (lagProgress) lagProgress.hide();
+    lagProgress = createProgressTracker('lagProgressContainer');
+    lagProgress.show('Loading consumer lag…');
     try {
-        const data = await withKafkaAuthRecovery(lagTopic || '', async (kafka) =>
-            getConsumerLagOverview(kafka, lagTopic));
+        const data = await withKafkaAuthRecovery(lagTopic || '', async (ctx) =>
+            getConsumerLagOverview(ctx, lagTopic, {
+                onProgress: (p) => {
+                    lagProgress.update(p);
+                    if (status) status.textContent = p.message || 'Loading…';
+                },
+            }));
         renderLagOverviewResult(data);
     } catch (err) {
         showAlert('Consumer lag', err.message);
         clearLagOverviewUI();
     } finally {
-        hideLoading();
+        if (lagProgress) {
+            lagProgress.hide();
+        }
         setLagResetControlsState();
     }
 }
@@ -2243,19 +2624,25 @@ function renderClusterMetadata(data) {
     });
 }
 
+let clusterProgress = null;
+
 async function loadClusterOverview() {
-    showLoading();
+    if (clusterProgress) clusterProgress.hide();
+    clusterProgress = createProgressTracker('clusterProgressContainer');
+    clusterProgress.show('Loading cluster metadata…');
     try {
         const configured = (envConfig && activeEnv && envConfig[activeEnv])
             ? envConfig[activeEnv].brokers
             : [];
-        const data = await withKafkaAuthRecovery('', async (kafka) =>
-            getClusterMetadata(kafka, configured));
+        const data = await withKafkaAuthRecovery('', async (ctx) =>
+            getClusterMetadata(ctx, configured, {
+                onProgress: (p) => clusterProgress.update(p),
+            }));
         renderClusterMetadata(data);
     } catch (err) {
         showAlert('Cluster overview', err.message);
     } finally {
-        hideLoading();
+        if (clusterProgress) clusterProgress.hide();
     }
 }
 
@@ -2283,12 +2670,114 @@ async function useTopic(topicName, methodId) {
     onTopicChange(topicName, methodId);
 }
 
+function onConsumeMessageReceived(msg) {
+    pushConsumedMessage(msg);
+}
+
+function onConsumeSessionEnded() {
+    resetConsumerIdleWatchdog();
+    resetConsumeUIState();
+}
+
+function onConsumeSessionError(err) {
+    showAlert('Kafka Consumer Error', err.message);
+    onConsumeSessionEnded();
+}
+
+function beginConsumerBlinkInterval() {
+    consumeStarted = true;
+    consumerBlinkOn = false;
+    window.refreshIntervalId = setInterval(() => {
+        consumerBlinkOn = !consumerBlinkOn;
+        renderConsumerTabBlink(consumerBlinkOn);
+    }, 1000);
+}
+
+async function startConsumingFlow(opts) {
+    globalProgress.show('Starting consumer…');
+    const ctx = await withKafkaAuthRecovery(opts.topic || '', async (c) => {
+        await pingKafkaAuth(c, {
+            onProgress: (p) => globalProgress.update(p),
+        });
+        return c;
+    });
+    setConsumerConsumeSummary(opts);
+    setConsumeRunningUI(true);
+    if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
+        showConsumerSeekingStatus({
+            partition: opts.partition,
+            offset: opts.offset,
+        });
+    }
+    await consumeMessages(ctx, opts, onConsumeMessageReceived, onConsumeSessionEnded, onConsumeSessionError);
+    beginConsumerBlinkInterval();
+    applyConsumerGroupFieldState();
+    if (!document.hasFocus()) {
+        scheduleConsumerBlurIdleTimer();
+    }
+}
+
+async function handleProduceClick() {
+    const produceProgress = createProgressTracker('produceProgressContainer');
+    produceProgress.show('Sending message…');
+    try {
+        const expanded = expandTokens(editor.getValue());
+        await withKafkaAuthRecovery(producerTopic || '', async (ctx) => {
+            await produceMessage(ctx, producerTopic, expanded, {
+                onProgress: (p) => produceProgress.update(p),
+            });
+        });
+    } catch (error) {
+        showAlert('Kafka Producer Error', error.message);
+    } finally {
+        produceProgress.hide();
+    }
+}
+
+async function handleConsumeButtonClick() {
+    const consumerTab = document.getElementById('consumer');
+    consumerTab.addEventListener('click', () => {
+        consumer.refresh();
+        const lastLine = consumer.getScrollInfo().height;
+        consumer.scrollTo(0, lastLine);
+    });
+
+    if (!consumeStarted) {
+        try {
+            const opts = readConsumerOptions();
+            if (!opts.topic) {
+                showAlert('Consumer', 'Please select a topic first.');
+                return;
+            }
+            consumerGroup = opts.groupId;
+            setGroupForTopic(activeEnv, opts.topic, consumerGroup);
+            updateSummaryCards();
+            await startConsumingFlow(opts);
+        } catch (error) {
+            onConsumeSessionError(error);
+        } finally {
+            globalProgress.hide();
+        }
+        return;
+    }
+
+    globalProgress.show('Stopping consumer…');
+    try {
+        await stopConsumingAndResetUI();
+    } finally {
+        globalProgress.hide();
+    }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     initializeThemeToggle();
     loadAppMode();
     applyAppModeToBody();
     initializeAppModeToggle();
     showLoading();
+    const startupHideTimer = setTimeout(() => {
+        hideLoading();
+    }, 15000);
     loadConfig().then(() => {
         const envIds = Object.keys(envConfig);
         const prefs = loadPreferences();
@@ -2335,90 +2824,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         onEnvChange(activeEnv);
         updateSummaryCards();
 
-        document.getElementById('produceButton').addEventListener('click', async () => {
-            showLoading();
-            try {
-                const expanded = expandTokens(editor.getValue());
-                await withKafkaAuthRecovery(producerTopic || '', async (kafka) => {
-                    await produceMessage(kafka, producerTopic, expanded);
-                });
-            } catch (error) {
-                showAlert('Kafka Producer Error', error.message);
-            }
-            hideLoading();
+        document.getElementById('produceButton').addEventListener('click', () => {
+            void handleProduceClick();
         });
 
         document.getElementById('clearMessages').addEventListener('click', () => {
             clearConsumedMessages();
         });
 
-        document.getElementById('consumeButton').addEventListener('click', async () => {
-            showLoading();
-            const consumerTab = document.getElementById('consumer');
-            consumerTab.addEventListener('click', () => {
-                consumer.refresh();
-                const lastLine = consumer.getScrollInfo().height;
-                consumer.scrollTo(0, lastLine);
-            });
-
-            if (!consumeStarted) {
-                try {
-                    const opts = readConsumerOptions();
-                    if (!opts.topic) {
-                        showAlert('Consumer', 'Please select a topic first.');
-                        hideLoading();
-                        return;
-                    }
-                    consumerGroup = opts.groupId;
-                    setGroupForTopic(activeEnv, opts.topic, consumerGroup);
-                    updateSummaryCards();
-
-                    await withKafkaAuthRecovery(opts.topic || '', pingKafkaAuth);
-                    const kafka = await getKafkaClient();
-                    setConsumerConsumeSummary(opts);
-                    setConsumeRunningUI(true);
-                    if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
-                        showConsumerSeekingStatus({
-                            partition: opts.partition,
-                            offset: opts.offset,
-                        });
-                    }
-                    consumeMessages(kafka, opts, (msg) => {
-                        pushConsumedMessage(msg);
-                    }, () => {
-                        resetConsumerIdleWatchdog();
-                        resetConsumeUIState();
-                    }).catch((err) => {
-                        showAlert('Kafka Consumer Error', err.message);
-                        resetConsumerIdleWatchdog();
-                        resetConsumeUIState();
-                    }).finally(() => {
-                        hideLoading();
-                    });
-
-                    consumeStarted = true;
-                    consumerBlinkOn = false;
-                    window.refreshIntervalId = setInterval(() => {
-                        consumerBlinkOn = !consumerBlinkOn;
-                        renderConsumerTabBlink(consumerBlinkOn);
-                    }, 1000);
-                    applyConsumerGroupFieldState();
-                    if (!document.hasFocus()) {
-                        scheduleConsumerBlurIdleTimer();
-                    }
-                } catch (error) {
-                    showAlert('Kafka Consumer Error', error.message);
-                    resetConsumerIdleWatchdog();
-                    resetConsumeUIState();
-                    hideLoading();
-                }
-            } else {
-                try {
-                    await stopConsumingAndResetUI();
-                } finally {
-                    hideLoading();
-                }
-            }
+        document.getElementById('consumeButton').addEventListener('click', () => {
+            void handleConsumeButtonClick();
         });
 
         document.getElementById('payload').addEventListener('keyup', () => {
@@ -2461,7 +2876,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             pendingConfigUpdate = null;
             reapplyConfig(cfg).catch((err) => showAlert('Failed to apply configuration', err.message));
         }
+    }).catch((err) => {
+        console.error('Startup failed:', err);
+        showAlert('Startup failed', err.message || String(err));
     }).finally(() => {
+        clearTimeout(startupHideTimer);
         hideLoading();
     });
 
@@ -2731,17 +3150,22 @@ function wireTemplateControls() {
 
 function wireTopicsBrowserControls() {
     const refreshBtn = document.getElementById('refreshTopicsButton');
+    const countsBtn = document.getElementById('loadTopicCountsButton');
     const cancelBtn = document.getElementById('cancelTopicsButton');
     const searchInput = document.getElementById('topicsSearchInput');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => loadTopicsBrowser(true));
     }
+    if (countsBtn) {
+        countsBtn.addEventListener('click', () => loadTopicsMessageCounts());
+    }
     if (cancelBtn) {
-        cancelBtn.addEventListener('click', () => cancelTopicsBrowserLoad('Topic loading cancelled.'));
+        cancelBtn.addEventListener('click', () => cancelTopicsBrowserLoad('Loading cancelled.'));
     }
     if (searchInput) {
-        searchInput.addEventListener('input', renderTopicsTable);
+        searchInput.addEventListener('input', debouncedRenderTopicsTable);
     }
+    syncTopicsBrowserActionState('');
 }
 
 function wireSetupButton() {
@@ -2754,7 +3178,7 @@ function wireSetupButton() {
 }
 
 async function reapplyConfig(newConfig) {
-    showLoading();
+    globalProgress.show('Applying configuration…');
     try {
         const valid = ajv.validate(schema, newConfig);
         if (!valid) {
@@ -2789,7 +3213,7 @@ async function reapplyConfig(newConfig) {
             loadTopicsBrowser(true);
         }
     } finally {
-        hideLoading();
+        globalProgress.hide();
         applyConsumerGroupFieldState();
     }
 }
@@ -2801,7 +3225,7 @@ function reloadProduceButton() {
 }
 
 const onEnvChange = (envId) => {
-    showLoading();
+    globalProgress.show('Switching environment…');
     cancelTopicsBrowserLoad('');
 
     activeEnv = envId;
@@ -2833,7 +3257,11 @@ const onEnvChange = (envId) => {
     clearLagOverviewUI();
 
     topicsCache = [];
-    invalidateKafkaClientCache();
+    topicsLoadedOnce = false;
+    topicsLoadState = 'idle';
+    topicsMessageLoadState = 'idle';
+    topicsMessagesLoadedOnce = false;
+    invalidateKafkaClientCache(envId);
 
     reloadProduceButton();
     updateSummaryCards();
@@ -2841,11 +3269,11 @@ const onEnvChange = (envId) => {
     syncUnsafeConsumerGroupBodyAttr();
 
     persistLastEnv(activeEnv);
-    hideLoading();
+    globalProgress.hide();
 };
 
 const onTopicChange = (topic, methodId) => {
-    showLoading();
+    globalProgress.show('Loading topic…');
     const m = methodId || activeMethod;
     if (m === 'consumer') {
         consumerTopic = topic;
@@ -2868,7 +3296,7 @@ const onTopicChange = (topic, methodId) => {
     reloadProduceButton();
     updateSummaryCards();
     applyConsumerGroupFieldState();
-    hideLoading();
+    globalProgress.hide();
 };
 
 function loadLazyMethodTabData(tabId) {

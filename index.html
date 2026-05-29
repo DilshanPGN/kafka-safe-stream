@@ -21,7 +21,7 @@
     <script src='codemirror/placeholder.min.js'></script>
 </head>
 <body data-theme="dark" data-kss-unsafe-consumer-groups="false">
-  <div id="loading-container">
+  <div id="loading-container" style="display: none;">
       <span class="loader"></span>
   </div>
   <div id="custom-alert" class="custom-alert">
@@ -118,6 +118,7 @@
       </aside>
       <div id="main">
           <header id="topbar">
+              <div id="globalProgressContainer" class="global-progress-container"></div>
               <div class="right-tools">
                   <label class="env-switcher" for="envSelect">
                       <span>Environment</span>
@@ -237,6 +238,7 @@
                           </div>
                           <div id="consumerOptionsConsumeSummary" class="consumer-consume-summary consumer-options-consume-summary options-row--basic-hide" hidden role="status" aria-live="polite"></div>
                           <div class="control-row offset-row options-row--basic-hide" id="offsetRow" style="display:none;">
+                              <div id="partitionProgressContainer" class="inline-progress-host"></div>
                               <label class="control-inline">
                                   <span>Partition</span>
                                   <select id="partitionSelect">
@@ -278,6 +280,7 @@
                   <div class="panel-heading">Producer Payload</div>
                   <div id="payload"></div>
                   <div class="actions">
+                      <div id="produceProgressContainer" class="inline-progress-host"></div>
                       <button id="formatButton" disabled>Format</button>
                       <button id="produceButton" disabled>Produce to Topic</button>
                   </div>
@@ -307,6 +310,7 @@
                                   <tbody id="consumedMessagesTableBody"></tbody>
                               </table>
                           </div>
+                          <p class="consumer-table-hint">Each column after <strong>Actions</strong> is one Kafka record header; the cell is that header’s UTF-8 value. <code>spring_json_header_types</code> is a Spring convention: its value is only a map of Java class names for other headers—the business values are in those headers’ own columns (e.g. <code>X-MessageType</code>, <code>x-request-id</code>). Use <strong>Raw event</strong> for the full record as JSON.</p>
                       </div>
                   </div>
                   <div class="actions">
@@ -318,12 +322,17 @@
               <div id="topicsBrowserContainer">
                   <div class="panel-heading">Topics &amp; Partitions</div>
                   <div class="topics-toolbar">
+                      <div id="topicsProgressContainer" class="kss-progress-host"></div>
                       <input type="text" id="topicsSearchInput" placeholder="Search topics…" />
                       <button id="refreshTopicsButton" class="btn-secondary">↻ Refresh</button>
+                      <button id="loadTopicCountsButton" class="btn-secondary" type="button" title="Fetch per-topic message counts (one broker request per topic; can be slow on large clusters)">Load message counts</button>
                       <button id="cancelTopicsButton" class="btn-secondary topics-cancel-btn" type="button" hidden>Cancel</button>
                       <span id="topicsCount" class="message-count">0 topics</span>
                       <span id="topicsStatus" class="topics-status" role="status" aria-live="polite"></span>
                   </div>
+                  <p id="topicsMessageCountsHint" class="topics-message-hint" hidden>
+                      Message counts are not loaded yet. Click <strong>Load message counts</strong> when you need them (one broker request per topic; can be slow on large clusters).
+                  </p>
                   <div id="topicsTableWrapper" class="topics-table-wrapper">
                       <table id="topicsTable" class="topics-table">
                           <thead>
@@ -332,19 +341,21 @@
                                   <th>Partitions</th>
                                   <th>Replication</th>
                                   <th>Leaders</th>
-                                  <th>Messages</th>
+                                  <th id="topicsMessagesHeader" title="Approximate retained messages per topic (log-end minus low watermark). Load separately via the toolbar button.">Messages</th>
                                   <th>Actions</th>
                               </tr>
                           </thead>
                           <tbody id="topicsTableBody"></tbody>
                       </table>
                       <div id="topicsEmptyState" class="topics-empty">No topics loaded. Click Refresh to load.</div>
+                      <div id="topicsWarningBanner" class="topics-warning-banner" hidden role="status"></div>
                   </div>
               </div>
               <div id="consumerLagContainer">
                   <div class="panel-heading">Consumer groups &amp; lag</div>
                   <p class="lag-hint">Pick a topic, then load committed offsets for every consumer group in the cluster. Only groups with at least one committed offset on this topic are listed. Large clusters may take a while. Resetting offsets or deleting groups is hidden by default; enable only by setting <code>allowedUnsafeOperations</code> to <code>true</code> for this environment in the config JSON (file or Setup → Advanced → edit JSON).</p>
                   <div class="lag-toolbar">
+                      <div id="lagProgressContainer" class="kss-progress-host"></div>
                       <label class="topic-label" for="lagTopicSelect">Topic</label>
                       <select id="lagTopicSelect"></select>
                       <button id="lagLoadButton" type="button" class="btn-primary">Load</button>
@@ -374,6 +385,7 @@
                   <div class="panel-heading">Cluster Metadata</div>
                   <p class="cluster-hint">Metadata from the Kafka metadata API (brokers, controller, topic count, topic/partition health). JVM health and per-broker metrics require external monitoring (e.g. JMX / Prometheus exporters).</p>
                   <div class="cluster-toolbar">
+                      <div id="clusterProgressContainer" class="kss-progress-host"></div>
                       <button id="clusterRefreshButton" type="button" class="btn-secondary">↻ Refresh</button>
                       <span id="clusterStatus" class="lag-status"></span>
                   </div>

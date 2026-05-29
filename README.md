@@ -29,7 +29,7 @@
 | **Producer** | JSON, XML, or plain text; format button; optional **templates** and **random token** inserts |
 | **Consumer** | Start/stop, filters (plain or regex), optional **table view** with metadata, **export** (JSON / JSONL / CSV), **view payload** in a separate window |
 | **Consumer options** | Group id, start from (beginning / latest / partition+offset), max messages; **background idle** prompt to avoid leaving a consumer running unnoticed |
-| **Topics browser** | List topics from the cluster (beyond the configured `topicList`) |
+| **Topics browser** | List topics from the cluster (beyond the configured `topicList`); **Refresh** loads metadata only (fast); optional **Load message counts** for retained message estimates (slow on large clusters) |
 | **Consumer lag** | Per-group lag for a chosen topic; optional **offset reset to latest** and **delete group** when `allowedUnsafeOperations` is enabled in config |
 | **Cluster** | Cluster id, brokers, controller, topic/partition health summary |
 | **Editor** | CodeMirror with syntax modes per format |
@@ -49,13 +49,16 @@ flowchart TB
         subgraph Main["Main process (src/main/main.js)"]
             Menu[Menu]
             Win[Windows: main / setup / about]
-            IPC[IPC: setup, config, credentials]
+            IPC[IPC: setup, config, credentials, kafka:*]
+            KS[kafkaService.js + worker pool]
         end
 
         subgraph Renderer["Renderer (src/renderer/renderer.js)"]
             Tabs[Produce · Consume · Topics · Lag · Cluster]
             CM[CodeMirror · filters · table · payload viewer window]
+            Bridge[kafkaBridge.js]
             Tabs --> CM
+            Tabs --> Bridge
         end
 
         subgraph Backend["src/backend/"]
@@ -66,14 +69,16 @@ flowchart TB
         end
     end
 
-    K --> Kafka[(Apache Kafka)]
-    Renderer --> K
-    Renderer --> KC
-    Renderer --> Tmpl
-    Renderer --> RT
+    Bridge --> IPC
+    IPC --> KS
+    KS --> K
     Main --> IPC
     IPC --> Renderer
     Menu --> Win
+    K --> Kafka[(Apache Kafka)]
+    Renderer --> KC
+    Renderer --> Tmpl
+    Renderer --> RT
 ```
 
 ### Producer flow
@@ -210,6 +215,8 @@ Secrets (passwords, OAuth token, AWS secret key, TLS key passphrase) are **not**
 3. **Produce** — Open **Produce**, pick topic and **format**, edit payload, **Format** if needed, then **Produce to Topic**. Optional: **Templates** (save/load/update) and **Insert token** for placeholders.
 4. **Consume** — **Consume** tab: filters, optional **table view**, **Export**, **Start** / **Stop**. In **Advanced**, set consumer group, **Start from**, partition/offset, and max messages.
 5. **Inspect** — **Topics** (list), **Consumer lag** (groups on a topic), **Cluster** (brokers + health). Dangerous lag actions require `allowedUnsafeOperations`.
+   - **Topics tab:** Click **Refresh** to load topic names, partitions, replication, and leaders (fast). Message counts are **not** fetched automatically — click **Load message counts** when you need them (one broker request per topic; can take minutes on large MSK clusters). Use **Cancel** to stop either operation.
+   - **Messages column states:** *Not loaded* (counts not fetched yet), *Loading…* (spinner while fetching), a number (retained messages: high watermark − low watermark), or *Failed* (hover for error). An info banner appears when topics are loaded but counts are not.
 6. **Menu** — **File → Setup**, **File → Quit**, **Help → About**.
 
 ---
@@ -220,16 +227,23 @@ Secrets (passwords, OAuth token, AWS secret key, TLS key passphrase) are **not**
 kafka-safe-stream/
 ├── src/
 │   ├── main/
-│   │   └── main.js         # Main process, menu, windows, IPC
+│   │   ├── main.js             # Main process, menu, windows, IPC
+│   │   ├── kafkaService.js     # Kafka ops in main process (client cache, admin pool, progress)
+│   │   └── kafkaWorkerPool.js  # Worker pool for parallel offset/count batches
+│   ├── workers/
+│   │   └── kafkaBatchWorker.js # Batch offset aggregation worker
 │   ├── renderer/
-│   │   ├── renderer.js     # UI, tabs, producer/consumer/inspector
+│   │   ├── renderer.js         # UI, tabs, producer/consumer/inspector
+│   │   ├── kafkaBridge.js      # Renderer IPC bridge to kafkaService
+│   │   ├── progress.js         # Shared progress bar UI
 │   │   ├── setup.js
 │   │   └── payload-viewer.js
 │   └── backend/
-│       ├── kafka.js        # KafkaJS: produce, consume, admin, lag
+│       ├── kafka.js            # KafkaJS: produce, consume, admin, lag, phased topics
 │       ├── kafkaConnection.js
-│       ├── templates.js    # Saved producer templates
-│       └── randomTokens.js # Token expansion for templates
+│       ├── concurrency.js      # Bounded concurrency + retries
+│       ├── templates.js        # Saved producer templates
+│       └── randomTokens.js     # Token expansion for templates
 ├── index.html              # Main shell
 ├── setup.html / setup.css
 ├── payload-viewer.html / payload-viewer.css  # Detached payload window
