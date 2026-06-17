@@ -1029,22 +1029,183 @@ function shouldSkipConsumedMessage(args) {
     return Number.isFinite(msgOffset) && msgOffset < args.targetOffsetNumber;
 }
 
-async function seekConsumerToOffset(kafka, topic, partition, offset) {
-    const targetOffset = String(offset);
-    if (hasConfiguredValue(partition)) {
-        consumer.seek({ topic, partition: Number(partition), offset: targetOffset });
-        return;
-    }
+function emitConsumeLog(onLog, level, message) {
+    if (typeof onLog !== 'function') return;
     try {
-        const admin = kafka.admin();
-        await admin.connect();
-        const partitionOffsets = await admin.fetchTopicOffsets(topic);
-        await admin.disconnect();
-        partitionOffsets.forEach((po) => {
-            consumer.seek({ topic, partition: po.partition, offset: targetOffset });
+        onLog({
+            timestamp: new Date().toISOString(),
+            level: level || 'info',
+            message: String(message || ''),
         });
     } catch (err) {
-        throw new Error('Failed to seek offsets: ' + err.message);
+        logDebug('consume onLog', err);
+    }
+}
+
+async function fetchGroupTopicCommittedOffsets(kafka, groupId, topic) {
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+        const blocks = await admin.fetchOffsets({ groupId, topics: [topic] });
+        const block = blocks.find((b) => b.topic === topic);
+        if (!block || !Array.isArray(block.partitions)) return new Map();
+        const map = new Map();
+        for (const pr of block.partitions) {
+            const partition = Number(pr.partition);
+            const committed = parseCommittedOffset(pr.offset);
+            if (committed !== null && Number.isFinite(partition)) {
+                map.set(partition, String(pr.offset));
+            }
+        }
+        return map;
+    } finally {
+        await safeAdminDisconnect(admin);
+    }
+}
+
+async function fetchTopicPartitionBounds(kafka, topic) {
+    const admin = kafka.admin();
+    try {
+        await admin.connect();
+        const rows = await admin.fetchTopicOffsets(topic);
+        const map = new Map();
+        for (const row of rows || []) {
+            const partition = Number(row.partition);
+            const high = Number(row.high !== undefined ? row.high : row.offset);
+            const low = Number(row.low !== undefined ? row.low : 0);
+            if (Number.isFinite(partition) && Number.isFinite(high) && Number.isFinite(low)) {
+                map.set(partition, { low, high });
+            }
+        }
+        return map;
+    } finally {
+        await safeAdminDisconnect(admin);
+    }
+}
+
+function logPartitionOffsetDiagnostics(topic, groupId, committedMap, boundsMap, onLog) {
+    const partitions = [...new Set([...committedMap.keys(), ...boundsMap.keys()])].sort((a, b) => a - b);
+    if (!partitions.length) {
+        emitConsumeLog(onLog, 'warn', `No partition offset metadata returned for topic "${topic}".`);
+        return;
+    }
+    for (const partition of partitions) {
+        const bounds = boundsMap.get(partition) || { low: null, high: null };
+        const committedRaw = committedMap.get(partition);
+        const committed = committedRaw !== undefined ? Number(committedRaw) : null;
+        let lag = null;
+        if (committed !== null && Number.isFinite(bounds.high)) {
+            lag = Math.max(0, bounds.high - committed);
+        }
+        const committedLabel = committedRaw !== undefined ? String(committedRaw) : 'none';
+        const lagLabel = lag === null ? '—' : String(lag);
+        emitConsumeLog(
+            onLog,
+            'info',
+            `Partition ${partition}: log start=${bounds.low}, log end=${bounds.high}, committed=${committedLabel}, lag=${lagLabel}`
+        );
+    }
+    if (!committedMap.size) {
+        emitConsumeLog(
+            onLog,
+            'info',
+            `Group "${groupId}" has no committed offsets on "${topic}" — beginning reads will start at log start.`
+        );
+    }
+}
+
+async function prepareConsumeSeekPlan(kafka, topic, groupId, startMode, onLog) {
+    if (startMode === 'offset') return null;
+
+    emitConsumeLog(onLog, 'info', 'Fetching committed offsets and topic watermarks…');
+    const committedMap = await fetchGroupTopicCommittedOffsets(kafka, groupId, topic);
+    const boundsMap = await fetchTopicPartitionBounds(kafka, topic);
+    const hasCommits = committedMap.size > 0;
+
+    logPartitionOffsetDiagnostics(topic, groupId, committedMap, boundsMap, onLog);
+
+    if (startMode === 'committed' && !hasCommits) {
+        emitConsumeLog(onLog, 'warn', 'No committed offsets found for this group on this topic.');
+    }
+
+    return { committedMap, hasCommits, boundsMap, startMode };
+}
+
+function seekConsumerPartition(topic, partition, offset, onLog, contextLabel) {
+    try {
+        consumer.seek({ topic, partition, offset: String(offset) });
+        emitConsumeLog(onLog, 'info', `Partition ${partition}: ${contextLabel} ${offset}`);
+        return true;
+    } catch (err) {
+        emitConsumeLog(
+            onLog,
+            'warn',
+            `Partition ${partition}: seek skipped (${err.message || String(err)})`
+        );
+        return false;
+    }
+}
+
+// eslint-disable-next-line sonarjs/cognitive-complexity -- per-partition seek rules vary by start mode
+function applySeekPlanToAssignedPartitions(topic, assignedPartitions, seekPlan, onLog) {
+    if (!seekPlan || !assignedPartitions.length) return;
+
+    const { committedMap, hasCommits, boundsMap, startMode } = seekPlan;
+    for (const partition of assignedPartitions) {
+        const bounds = boundsMap.get(partition);
+        const committedOffset = committedMap.get(partition);
+
+        if (startMode === 'earliest') {
+            if (committedOffset !== undefined && bounds && Number.isFinite(bounds.high)) {
+                const lag = Math.max(0, bounds.high - Number(committedOffset));
+                if (lag === 0) {
+                    emitConsumeLog(
+                        onLog,
+                        'warn',
+                        `Partition ${partition}: group is caught up (committed at log end) — Beginning will read from log start anyway (read-only, offsets not committed).`
+                    );
+                }
+            }
+            if (bounds) {
+                if (bounds.high <= bounds.low) {
+                    emitConsumeLog(onLog, 'warn', `Partition ${partition}: topic partition is empty (log start ${bounds.low}, log end ${bounds.high}).`);
+                } else {
+                    seekConsumerPartition(topic, partition, bounds.low, onLog, 'seeking to log start');
+                }
+            } else {
+                emitConsumeLog(onLog, 'warn', `Partition ${partition}: no watermark metadata — relying on broker default position`);
+            }
+            continue;
+        }
+
+        if (startMode === 'committed' || (startMode === 'latest' && hasCommits)) {
+            if (committedOffset !== undefined) {
+                seekConsumerPartition(topic, partition, committedOffset, onLog, 'seeking to committed offset');
+                continue;
+            }
+            if (startMode === 'committed') {
+                emitConsumeLog(
+                    onLog,
+                    'warn',
+                    `Partition ${partition}: no committed offset for this group — will use broker default`
+                );
+            }
+        }
+
+        if (startMode === 'latest' && !hasCommits && bounds) {
+            seekConsumerPartition(topic, partition, bounds.high, onLog, 'new group — seeking to log end');
+        }
+    }
+}
+
+function seekAssignedPartitionsForOffsetMode(topic, assignedPartitions, partition, offset, onLog) {
+    const targetOffset = String(offset);
+    if (hasConfiguredValue(partition)) {
+        seekConsumerPartition(topic, Number(partition), targetOffset, onLog, 'seeking to offset');
+        return;
+    }
+    for (const p of assignedPartitions) {
+        seekConsumerPartition(topic, p, targetOffset, onLog, 'seeking to offset');
     }
 }
 
@@ -1056,6 +1217,7 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
         partition = null,
         offset = null,
         maxMessages = null,
+        onLog = null,
     } = options || {};
 
     if (!topic) {
@@ -1067,8 +1229,8 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
 
     consumerStopping = false;
     const consumerConfig = { groupId };
-    if (startMode === 'offset') {
-        // Specific-offset reads should not advance committed group offsets.
+    if (startMode === 'offset' || startMode === 'committed' || startMode === 'earliest') {
+        // Read-only inspection modes should not advance committed group offsets.
         consumerConfig.autoCommit = false;
     }
     consumer = kafka.consumer(consumerConfig);
@@ -1079,7 +1241,6 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
     const targetOffsetNumber = startMode === 'offset' && hasConfiguredValue(offset)
         ? Number(offset)
         : null;
-
     const stopFromInside = async () => {
         if (stopRequested) return;
         stopRequested = true;
@@ -1092,13 +1253,49 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
         });
     };
 
+    let seekPlan = null;
+
+    const { GROUP_JOIN } = consumer.events;
+    consumer.on(GROUP_JOIN, (event) => {
+        if (consumerStopping) return;
+        const payload = event && event.payload ? event.payload : {};
+        const assignment = payload.memberAssignment || {};
+        const assigned = Array.isArray(assignment[topic]) ? assignment[topic].slice() : [];
+        emitConsumeLog(
+            onLog,
+            'info',
+            `Joined consumer group "${groupId}" — assigned ${assigned.length} partition(s): [${assigned.join(', ')}]`
+        );
+        if (!assigned.length) {
+            emitConsumeLog(
+                onLog,
+                'warn',
+                'No partitions were assigned. Another active member may hold all partitions for this group, or the topic has no partitions.'
+            );
+            return;
+        }
+        if (startMode === 'offset' && hasConfiguredValue(offset)) {
+            seekAssignedPartitionsForOffsetMode(topic, assigned, partition, offset, onLog);
+        } else {
+            applySeekPlanToAssignedPartitions(topic, assigned, seekPlan, onLog);
+        }
+        emitConsumeLog(onLog, 'info', 'Partition positions set — waiting for messages…');
+    });
+
     try {
+        emitConsumeLog(onLog, 'info', `Connecting consumer (group: ${groupId}, topic: ${topic}, start: ${startMode})…`);
         await consumer.connect();
+        emitConsumeLog(onLog, 'info', `Subscribing to topic "${topic}"…`);
         await consumer.subscribe({
             topic,
             fromBeginning: startMode === 'earliest',
         });
 
+        if (startMode !== 'offset') {
+            seekPlan = await prepareConsumeSeekPlan(kafka, topic, groupId, startMode, onLog);
+        }
+
+        emitConsumeLog(onLog, 'info', 'Starting consumer loop and waiting for group assignment…');
         await consumer.run({
             eachMessage: async ({ topic: t, partition: p, message }) => {
                 if (shouldSkipConsumedMessage({
@@ -1109,6 +1306,9 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
                     message,
                 })) return;
                 received += 1;
+                if (received === 1) {
+                    emitConsumeLog(onLog, 'info', `First message received (partition ${p}, offset ${message.offset})`);
+                }
                 try {
                     onMessage({
                         topic: t,
@@ -1124,15 +1324,13 @@ async function consumeMessages(kafka, options, onMessage, onDone) {
                 }
 
                 if (limit !== null && received >= limit) {
+                    emitConsumeLog(onLog, 'info', `Reached max messages (${limit}) — stopping consumer`);
                     await stopFromInside();
                 }
             },
         });
-
-        if (startMode === 'offset' && hasConfiguredValue(offset)) {
-            await seekConsumerToOffset(kafka, topic, partition, offset);
-        }
     } catch (error) {
+        emitConsumeLog(onLog, 'error', error.message || String(error));
         throw new Error('Failed to connect to Kafka: ' + error.message);
     }
 }

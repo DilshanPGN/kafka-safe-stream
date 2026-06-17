@@ -87,6 +87,33 @@
           </div>
       </div>
   </div>
+  <div id="consumer-activity-overlay" class="consumer-activity-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="consumer-activity-title">
+      <div class="consumer-activity-backdrop" aria-hidden="true"></div>
+      <div id="consumer-activity-dialog" class="custom-alert prompt-modal consumer-activity-modal">
+          <div class="custom-alert-content prompt-content">
+              <h3 id="consumer-activity-title">Starting consumer</h3>
+              <p id="consumer-activity-message" class="consumer-activity-message">Connecting and joining the consumer group…</p>
+              <div id="consumer-activity-spinner" class="consumer-activity-spinner" aria-hidden="true"></div>
+              <div class="prompt-actions consumer-activity-actions">
+                  <button type="button" id="consumer-activity-view-log" class="btn-secondary">View log</button>
+                  <button type="button" id="consumer-activity-stop" class="btn-danger">Stop consuming</button>
+              </div>
+          </div>
+      </div>
+  </div>
+  <div id="consumer-log-overlay" class="consumer-log-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="consumer-log-title">
+      <div class="consumer-log-backdrop" aria-hidden="true"></div>
+      <div id="consumer-log-dialog" class="custom-alert prompt-modal consumer-log-modal">
+          <div class="custom-alert-content prompt-content">
+              <h3 id="consumer-log-title">Consumer activity log</h3>
+              <pre id="consumer-log-body" class="consumer-log-body" aria-live="polite"></pre>
+              <div class="prompt-actions consumer-log-actions">
+                  <button type="button" id="consumer-log-stop" class="btn-danger">Stop consuming</button>
+                  <button type="button" id="consumer-log-close" class="btn-primary">Close</button>
+              </div>
+          </div>
+      </div>
+  </div>
   <div id="consumer-idle-overlay" class="consumer-idle-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="consumer-idle-title">
       <div class="consumer-idle-backdrop" aria-hidden="true"></div>
       <div id="consumer-idle-dialog" class="custom-alert prompt-modal consumer-idle-modal">
@@ -227,12 +254,13 @@
                                       </button>
                                   </div>
                                   <div id="consumerStartModeHelpTooltip" class="consumer-start-mode-tooltip" role="tooltip" hidden>
-                                      <p class="consumer-start-mode-tooltip__text">“Now (latest)” only delivers messages produced <em>after</em> you start consuming. “Beginning” applies when the consumer group has <em>no</em> committed offsets; otherwise Kafka resumes from the last commit—use a <strong>new consumer group</strong> name (or reset offsets in Consumer lag) to read older data again.</p>
+                                      <p class="consumer-start-mode-tooltip__text">“Catch up lag” reads from the group’s <em>committed offsets</em> (best for groups with lag). “Beginning” always reads from the <em>log start</em> (read-only; does not commit offsets). “Now (latest)” only delivers messages produced <em>after</em> you start for <em>new</em> groups; existing groups resume from their last commit.</p>
                                   </div>
                               </div>
                               <div class="radio-group" id="startModeGroup" role="radiogroup" aria-labelledby="startFromGroupLabel">
+                                  <label><input type="radio" name="startMode" value="committed" checked> Catch up lag</label>
                                   <label><input type="radio" name="startMode" value="latest"> Now (latest)</label>
-                                  <label><input type="radio" name="startMode" value="earliest" checked> Beginning</label>
+                                  <label><input type="radio" name="startMode" value="earliest"> Beginning</label>
                                   <label><input type="radio" name="startMode" value="offset"> Specific offset</label>
                               </div>
                           </div>
@@ -315,6 +343,7 @@
                   </div>
                   <div class="actions">
                       <button type="button" id="exportConsumedButton" class="btn-secondary">Export</button>
+                      <button type="button" id="consumerActivityLogButton" class="btn-secondary" hidden title="View consumer startup and connection log">View log</button>
                       <button id="clearMessages">Clear</button>
                       <button id="consumeButton">Start Consuming</button>
                   </div>
@@ -373,7 +402,8 @@
                                   <th>Committed</th>
                                   <th>Log end</th>
                                   <th>Lag</th>
-                                  <th class="lag-col-actions">Actions</th>
+                                  <th class="lag-col-consume">Consume</th>
+                                  <th class="lag-col-actions">Reset / delete</th>
                               </tr>
                           </thead>
                           <tbody id="lagTableBody"></tbody>

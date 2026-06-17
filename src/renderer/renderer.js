@@ -98,6 +98,10 @@ let activeTopicList = null;
 let producerTopic = '';
 let consumerTopic = '';
 let consumeStarted = false;
+let consumeStarting = false;
+/** @type {Array<{ timestamp: string, level: string, message: string }>} */
+let consumeActivityLog = [];
+let consumeActivityLogVisible = false;
 let envConfig = null;
 let validPayload = false;
 let editor = null;
@@ -540,7 +544,7 @@ function applyConsumerGroupFieldState() {
     const groupInput = document.getElementById('consumerGroupInput');
     if (!groupInput) return;
     const basic = appMode === 'basic';
-    groupInput.disabled = basic || consumeStarted;
+    groupInput.disabled = basic || consumeStarted || consumeStarting;
     if (basic) {
         groupInput.title = 'Switch to Advanced mode to edit the consumer group.';
     } else if (consumeStarted) {
@@ -602,6 +606,112 @@ function initializeAppModeToggle() {
     }
 }
 
+function formatConsumeLogLine(entry) {
+    if (!entry) return '';
+    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '';
+    const level = (entry.level || 'info').toUpperCase().padEnd(5, ' ');
+    return `[${ts}] ${level} ${entry.message || ''}`;
+}
+
+function renderConsumeActivityLog() {
+    const body = document.getElementById('consumer-log-body');
+    if (!body) return;
+    body.textContent = consumeActivityLog.map(formatConsumeLogLine).join('\n') || '(no log entries yet)';
+    body.scrollTop = body.scrollHeight;
+}
+
+function appendConsumeActivityLog(entry) {
+    if (!entry) return;
+    consumeActivityLog.push(entry);
+    if (consumeActivityLog.length > 500) {
+        consumeActivityLog = consumeActivityLog.slice(-500);
+    }
+    if (consumeActivityLogVisible) {
+        renderConsumeActivityLog();
+    }
+    const msgEl = document.getElementById('consumer-activity-message');
+    if (msgEl && entry.message) {
+        msgEl.textContent = entry.message;
+    }
+}
+
+function showConsumerLogModal() {
+    const overlay = document.getElementById('consumer-log-overlay');
+    if (!overlay) return;
+    consumeActivityLogVisible = true;
+    renderConsumeActivityLog();
+    overlay.style.display = 'flex';
+}
+
+function hideConsumerLogModal() {
+    const overlay = document.getElementById('consumer-log-overlay');
+    if (overlay) overlay.style.display = 'none';
+    consumeActivityLogVisible = false;
+}
+
+function showConsumerActivityOverlay(message) {
+    const overlay = document.getElementById('consumer-activity-overlay');
+    const msgEl = document.getElementById('consumer-activity-message');
+    const spinner = document.getElementById('consumer-activity-spinner');
+    if (!overlay) return;
+    if (msgEl) msgEl.textContent = message || 'Connecting and joining the consumer group…';
+    if (spinner) spinner.style.display = '';
+    overlay.style.display = 'flex';
+}
+
+function hideConsumerActivityOverlay() {
+    const overlay = document.getElementById('consumer-activity-overlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+function resetConsumeActivityLog() {
+    consumeActivityLog = [];
+    consumeActivityLogVisible = false;
+    const body = document.getElementById('consumer-log-body');
+    if (body) body.textContent = '';
+}
+
+function onConsumeActivityLogEntry(entry) {
+    appendConsumeActivityLog(entry);
+    if (entry && entry.level === 'info' && /partition positions set/i.test(entry.message || '')) {
+        hideConsumerActivityOverlay();
+    }
+    if (entry && entry.level === 'warn' && /no partitions were assigned/i.test(entry.message || '')) {
+        const msgEl = document.getElementById('consumer-activity-message');
+        if (msgEl) {
+            msgEl.textContent = 'Connected, but no partitions were assigned. Open the log for details.';
+        }
+    }
+}
+
+function wireConsumerActivityControls() {
+    const viewLogBtn = document.getElementById('consumer-activity-view-log');
+    const stopBtn = document.getElementById('consumer-activity-stop');
+    const logStopBtn = document.getElementById('consumer-log-stop');
+    const logCloseBtn = document.getElementById('consumer-log-close');
+    const logBackdrop = document.querySelector('.consumer-log-backdrop');
+    const stopConsumerFromModal = () => {
+        hideConsumerActivityOverlay();
+        hideConsumerLogModal();
+        void stopConsumingAndResetUI();
+    };
+    if (viewLogBtn) {
+        viewLogBtn.addEventListener('click', () => showConsumerLogModal());
+    }
+    if (stopBtn) {
+        stopBtn.addEventListener('click', stopConsumerFromModal);
+    }
+    if (logStopBtn) {
+        logStopBtn.addEventListener('click', stopConsumerFromModal);
+    }
+    if (logCloseBtn) {
+        logCloseBtn.addEventListener('click', () => hideConsumerLogModal());
+    }
+    if (logBackdrop) {
+        logBackdrop.addEventListener('click', () => hideConsumerLogModal());
+    }
+}
+
 function hideConsumerSeekingStatus() {
     const el = document.getElementById('consumerFetchStatus');
     if (el) {
@@ -617,11 +727,17 @@ function hideConsumerSeekingStatus() {
 function showConsumerSeekingStatus(opts) {
     const el = document.getElementById('consumerFetchStatus');
     if (!el) return;
-    const partLabel = opts.partition != null && opts.partition !== ''
-        ? `partition ${opts.partition}`
-        : 'all partitions';
-    const off = opts.offset != null && String(opts.offset) !== '' ? String(opts.offset) : '(unspecified)';
-    el.innerHTML = `<span class="consumer-fetch-spinner" aria-hidden="true"></span><span class="consumer-fetch-text">Seeking to offset ${off} on ${partLabel} — waiting for messages…</span>`;
+    let statusText;
+    if (opts && opts.message) {
+        statusText = opts.message;
+    } else {
+        const partLabel = opts.partition != null && opts.partition !== ''
+            ? `partition ${opts.partition}`
+            : 'all partitions';
+        const off = opts.offset != null && String(opts.offset) !== '' ? String(opts.offset) : '(unspecified)';
+        statusText = `Seeking to offset ${off} on ${partLabel} — waiting for messages…`;
+    }
+    el.innerHTML = `<span class="consumer-fetch-spinner" aria-hidden="true"></span><span class="consumer-fetch-text">${escapeHtml(statusText)}</span>`;
     el.classList.add('is-visible');
     if (consumerSeekHintTimerId) {
         clearTimeout(consumerSeekHintTimerId);
@@ -780,6 +896,16 @@ function initializeEditor() {
 }
 
 function initializeConsumer() {
+    wireConsumerActivityControls();
+    const consumerTab = document.getElementById('consumer');
+    if (consumerTab) {
+        consumerTab.addEventListener('click', () => {
+            if (!consumer) return;
+            consumer.refresh();
+            const lastLine = consumer.getScrollInfo().height;
+            consumer.scrollTo(0, lastLine);
+        });
+    }
     const consumerContainer = document.getElementById('consumedMessages');
     consumer = CodeMirror(consumerContainer, {
         lineSeparator: null,
@@ -1446,6 +1572,7 @@ async function handleExportConsumed() {
 
 function pushConsumedMessage(msg) {
     hideConsumerSeekingStatus();
+    hideConsumerActivityOverlay();
     consumedMessages.push(msg);
     applyFilter();
 }
@@ -1634,6 +1761,7 @@ function resetConsumerIdleWatchdog() {
 
 function resetConsumeUIState() {
     hideConsumerSeekingStatus();
+    hideConsumerActivityOverlay();
     if (window.refreshIntervalId) {
         clearInterval(window.refreshIntervalId);
         window.refreshIntervalId = null;
@@ -1641,6 +1769,7 @@ function resetConsumeUIState() {
     renderConsumerTabBlink(false);
     setConsumeRunningUI(false);
     consumeStarted = false;
+    consumeStarting = false;
     applyConsumerGroupFieldState();
 }
 
@@ -2199,11 +2328,14 @@ function clearLagOverviewUI(message) {
 }
 
 function setLagResetControlsState() {
-    const busy = lagResetInFlight;
+    const busy = lagResetInFlight || consumeStarting || consumeStarted;
     document.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
         btn.disabled = busy;
     });
     document.querySelectorAll('[data-lag-delete-group]').forEach((btn) => {
+        btn.disabled = busy;
+    });
+    document.querySelectorAll('[data-lag-consume-group]').forEach((btn) => {
         btn.disabled = busy;
     });
 }
@@ -2384,20 +2516,44 @@ function lagClientsCells(clientsStr, clientsShort) {
     return { clientsTitle, clientsBody };
 }
 
-function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
+function buildLagConsumeCell(group, showGroupActions) {
+    if (!showGroupActions) return '';
+    const rowspan = String(group.partitions.length);
+    const groupAttr = encodeURIComponent(group.groupId);
+    return `<td class="lag-action-cell lag-col-consume" rowspan="${rowspan}">
+                    <button type="button" class="btn-secondary lag-consume-btn" data-lag-consume-group="${groupAttr}" title="Consume from this group's committed offsets">Consume lag</button>
+                </td>`;
+}
+
+function buildLagUnsafeActionCell(group, showGroupActions, lagActionsDisabledAttr) {
+    if (!showGroupActions) return '';
+    const rowspan = String(group.partitions.length);
+    const groupAttr = encodeURIComponent(group.groupId);
+    return `<td class="lag-action-cell lag-col-actions" rowspan="${rowspan}">
+                    <div class="lag-action-buttons">
+                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${groupAttr}" ${lagActionsDisabledAttr}>Reset to latest</button>
+                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${groupAttr}" ${lagActionsDisabledAttr}>Delete group</button>
+                    </div>
+                </td>`;
+}
+
+function buildLagActionCell(group, showGroupActions, unsafe, lagActionsDisabledAttr) {
+    if (unsafe) {
+        return buildLagUnsafeActionCell(group, showGroupActions, lagActionsDisabledAttr);
+    }
+    if (!showGroupActions) return '';
+    const rowspan = String(group.partitions.length);
+    return `<td class="lag-action-cell lag-col-actions" rowspan="${rowspan}" aria-hidden="true"></td>`;
+}
+
+function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort, showGroupActions) {
     const tr = document.createElement('tr');
     const { committedCell, lagCell } = lagCommittedAndLagCells(pr);
     const { clientsTitle, clientsBody } = lagClientsCells(clientsStr, clientsShort);
     const unsafe = isUnsafeConsumerGroupOpsAllowed();
     const lagActionsDisabledAttr = lagResetInFlight ? 'disabled' : '';
-    const actionCell = unsafe
-        ? `<td class="lag-action-cell lag-col-actions">
-                    <div class="lag-action-buttons">
-                    <button type="button" class="btn-secondary lag-reset-btn" data-lag-reset-group="${encodeURIComponent(g.groupId)}" ${lagActionsDisabledAttr}>Reset to latest</button>
-                    <button type="button" class="btn-danger lag-delete-btn" data-lag-delete-group="${encodeURIComponent(g.groupId)}" ${lagActionsDisabledAttr}>Delete group</button>
-                    </div>
-                </td>`
-        : '<td class="lag-action-cell lag-col-actions" aria-hidden="true"></td>';
+    const consumeCell = buildLagConsumeCell(g, showGroupActions);
+    const actionCell = buildLagActionCell(g, showGroupActions, unsafe, lagActionsDisabledAttr);
     tr.innerHTML = `
                 <td class="topic-cell">${escapeHtml(g.groupId)}</td>
                 <td>${escapeHtml(String(g.state))}</td>
@@ -2407,6 +2563,7 @@ function appendLagPartitionRow(body, g, pr, clientsStr, clientsShort) {
                 <td>${committedCell}</td>
                 <td>${escapeHtml(String(pr.logEnd))}</td>
                 <td>${lagCell}</td>
+                ${consumeCell}
                 ${actionCell}
             `;
     body.appendChild(tr);
@@ -2417,13 +2574,57 @@ function appendLagOverviewRows(body, data) {
         const clients = (g.members || []).map((m) => m.clientId || m.memberId).filter(Boolean);
         const clientsStr = clients.join(', ');
         const clientsShort = clientsStr.length > 48 ? `${clientsStr.slice(0, 45)}…` : clientsStr;
+        let firstPartition = true;
         for (const pr of g.partitions) {
-            appendLagPartitionRow(body, g, pr, clientsStr, clientsShort);
+            appendLagPartitionRow(body, g, pr, clientsStr, clientsShort, firstPartition);
+            firstPartition = false;
         }
     }
 }
 
+async function startConsumeForLagGroup(groupId) {
+    if (!lagTopic || !groupId) return;
+    if (consumeStarted || consumeStarting) {
+        showAlert('Consumer', 'Stop the current consumer before starting another.');
+        return;
+    }
+    if (appMode === 'basic') {
+        setAppMode('advanced');
+    }
+    ensureTopicInList(lagTopic);
+    onMethodTabClick(document.getElementById('consumer'));
+    populateTopicSelect();
+    onTopicChange(lagTopic, 'consumer');
+    consumerGroup = groupId;
+    const groupInput = document.getElementById('consumerGroupInput');
+    if (groupInput) groupInput.value = groupId;
+    setGroupForTopic(activeEnv, lagTopic, groupId);
+    const committedRadio = document.querySelector('input[name="startMode"][value="committed"]');
+    if (committedRadio) committedRadio.checked = true;
+    const offsetRow = document.getElementById('offsetRow');
+    if (offsetRow) offsetRow.style.display = 'none';
+    updateSummaryCards();
+    try {
+        await startConsumingFlow(readConsumerOptions());
+    } catch (err) {
+        onConsumeSessionError(err);
+    }
+}
+
 function bindLagOverviewRowActions(body) {
+    body.querySelectorAll('[data-lag-consume-group]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            let groupId = '';
+            try {
+                groupId = decodeURIComponent(btn.getAttribute('data-lag-consume-group') || '');
+            } catch (err) {
+                logDebug('decode lag-consume-group', err);
+                return;
+            }
+            if (!groupId) return;
+            void startConsumeForLagGroup(groupId);
+        });
+    });
     body.querySelectorAll('[data-lag-reset-group]').forEach((btn) => {
         btn.addEventListener('click', () => {
             let groupId = '';
@@ -2685,7 +2886,6 @@ function onConsumeSessionError(err) {
 }
 
 function beginConsumerBlinkInterval() {
-    consumeStarted = true;
     consumerBlinkOn = false;
     window.refreshIntervalId = setInterval(() => {
         consumerBlinkOn = !consumerBlinkOn;
@@ -2694,26 +2894,49 @@ function beginConsumerBlinkInterval() {
 }
 
 async function startConsumingFlow(opts) {
+    resetConsumeActivityLog();
+    consumeStarting = true;
+    showConsumerActivityOverlay('Verifying Kafka connection…');
     globalProgress.show('Starting consumer…');
-    const ctx = await withKafkaAuthRecovery(opts.topic || '', async (c) => {
-        await pingKafkaAuth(c, {
-            onProgress: (p) => globalProgress.update(p),
+    setConsumeRunningUI(true, { starting: true });
+    try {
+        const ctx = await withKafkaAuthRecovery(opts.topic || '', async (c) => {
+            await pingKafkaAuth(c, {
+                onProgress: (p) => globalProgress.update(p),
+            });
+            return c;
         });
-        return c;
-    });
-    setConsumerConsumeSummary(opts);
-    setConsumeRunningUI(true);
-    if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
-        showConsumerSeekingStatus({
-            partition: opts.partition,
-            offset: opts.offset,
-        });
-    }
-    await consumeMessages(ctx, opts, onConsumeMessageReceived, onConsumeSessionEnded, onConsumeSessionError);
-    beginConsumerBlinkInterval();
-    applyConsumerGroupFieldState();
-    if (!document.hasFocus()) {
-        scheduleConsumerBlurIdleTimer();
+        setConsumerConsumeSummary(opts);
+        showConsumerActivityOverlay('Starting consumer and joining group…');
+        if (opts.startMode === 'offset' && opts.offset != null && String(opts.offset) !== '') {
+            showConsumerSeekingStatus({
+                partition: opts.partition,
+                offset: opts.offset,
+            });
+        } else if (opts.startMode === 'committed') {
+            showConsumerSeekingStatus({
+                message: `Catch up lag for group "${opts.groupId}" — seeking to committed offsets…`,
+            });
+        }
+        await consumeMessages(
+            ctx,
+            opts,
+            onConsumeMessageReceived,
+            onConsumeSessionEnded,
+            onConsumeSessionError,
+            onConsumeActivityLogEntry
+        );
+        consumeStarted = true;
+        beginConsumerBlinkInterval();
+        hideConsumerActivityOverlay();
+        applyConsumerGroupFieldState();
+        if (!document.hasFocus()) {
+            scheduleConsumerBlurIdleTimer();
+        }
+    } finally {
+        consumeStarting = false;
+        setConsumeRunningUI(consumeStarted, { starting: false });
+        globalProgress.hide();
     }
 }
 
@@ -2735,12 +2958,10 @@ async function handleProduceClick() {
 }
 
 async function handleConsumeButtonClick() {
-    const consumerTab = document.getElementById('consumer');
-    consumerTab.addEventListener('click', () => {
-        consumer.refresh();
-        const lastLine = consumer.getScrollInfo().height;
-        consumer.scrollTo(0, lastLine);
-    });
+    if (consumeStarting) {
+        showConsumerActivityOverlay('Still starting consumer — use Stop consuming or View log.');
+        return;
+    }
 
     if (!consumeStarted) {
         try {
@@ -2755,8 +2976,6 @@ async function handleConsumeButtonClick() {
             await startConsumingFlow(opts);
         } catch (error) {
             onConsumeSessionError(error);
-        } finally {
-            globalProgress.hide();
         }
         return;
     }
@@ -2898,9 +3117,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 function formatConsumeSummaryText(opts) {
     if (!opts) return '';
     let startLine;
-    const sm = opts.startMode || 'earliest';
-    if (sm === 'earliest') {
-        startLine = 'Beginning';
+    const sm = opts.startMode || 'committed';
+    if (sm === 'committed') {
+        startLine = `Catch up lag (group: ${opts.groupId || '—'})`;
+    } else     if (sm === 'earliest') {
+        startLine = 'Beginning (log start, read-only)';
     } else if (sm === 'offset') {
         const partLabel = opts.partition == null ? 'All partitions' : `Partition ${opts.partition}`;
         const off = opts.offset != null && String(opts.offset) !== ''
@@ -2928,9 +3149,14 @@ function setConsumerConsumeSummary(opts) {
     });
 }
 
-function setConsumeRunningUI(running) {
+function setConsumeRunningUI(running, opts) {
     const consumeBtn = document.getElementById('consumeButton');
+    const logBtn = document.getElementById('consumerActivityLogButton');
     if (!consumeBtn) return;
+    const starting = !!(opts && opts.starting);
+    if (logBtn) {
+        logBtn.hidden = !(running || starting);
+    }
     const optionsSection = document.getElementById('optionsConsumerSection');
     if (optionsSection) {
         optionsSection.classList.toggle('is-consuming', !!running);
@@ -2938,16 +3164,23 @@ function setConsumeRunningUI(running) {
     if (!running) {
         setConsumerConsumeSummary(null);
     }
-    consumeBtn.innerHTML = running ? 'Stop Consuming' : 'Start Consuming';
-    consumeBtn.style.backgroundColor = running ? '#dc3545' : '';
-    consumeBtn.disabled = !running && (consumerTopic === '');
+    if (starting) {
+        consumeBtn.innerHTML = 'Starting…';
+        consumeBtn.style.backgroundColor = '';
+        consumeBtn.disabled = true;
+    } else {
+        consumeBtn.innerHTML = running ? 'Stop Consuming' : 'Start Consuming';
+        consumeBtn.style.backgroundColor = running ? '#dc3545' : '';
+        consumeBtn.disabled = !running && (consumerTopic === '');
+    }
     const fields = ['startModeGroup', 'partitionSelect', 'offsetInput', 'maxMessagesInput', 'consumerGroupInput'];
     fields.forEach((id) => {
         const el = document.getElementById(id);
         if (!el) return;
         const inputs = el.tagName === 'INPUT' || el.tagName === 'SELECT' ? [el] : el.querySelectorAll('input, select');
-        inputs.forEach((i) => { i.disabled = running; });
+        inputs.forEach((i) => { i.disabled = running || starting; });
     });
+    setLagResetControlsState();
 }
 
 function readConsumerOptions() {
@@ -2957,14 +3190,14 @@ function readConsumerOptions() {
         return {
             topic: consumerTopic,
             groupId: groupRaw || DEFAULT_GROUP,
-            /* Basic hides “Start from”; use beginning so test topics with existing data show messages (latest only shows new records after join). */
-            startMode: 'earliest',
+            /* Basic hides “Start from”; catch up from committed offsets for groups with lag. */
+            startMode: 'committed',
             partition: null,
             offset: null,
             maxMessages: maxMessagesRaw === '' ? null : Number(maxMessagesRaw),
         };
     }
-    const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'earliest';
+    const startMode = (document.querySelector('input[name="startMode"]:checked') || {}).value || 'committed';
     const partitionRaw = document.getElementById('partitionSelect').value;
     const offsetRaw = document.getElementById('offsetInput').value;
     return {
@@ -3076,6 +3309,11 @@ function wireConsumerControls() {
     }
 
     wireConsumerStartModeHelp();
+
+    const activityLogBtn = document.getElementById('consumerActivityLogButton');
+    if (activityLogBtn) {
+        activityLogBtn.addEventListener('click', () => showConsumerLogModal());
+    }
 }
 
 function wireTemplateControls() {

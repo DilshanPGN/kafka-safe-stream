@@ -414,6 +414,13 @@ body[data-kss-unsafe-consumer-groups="false"] #consumerLagContainer .lag-col-act
     display: none !important;
 }
 
+body[data-app-mode="basic"] #consumerLagContainer .lag-reset-btn,
+body[data-app-mode="basic"] #consumerLagContainer .lag-delete-btn,
+body[data-kss-unsafe-consumer-groups="false"] #consumerLagContainer .lag-reset-btn,
+body[data-kss-unsafe-consumer-groups="false"] #consumerLagContainer .lag-delete-btn {
+    display: none !important;
+}
+
 .consumer-fetch-status {
     display: none;
     align-items: flex-start;
@@ -2237,6 +2244,100 @@ body[data-theme="dark"] .consumer-messages-table .consumer-msg-value-cell {
 .kafka-auth-actions-spacer {
     flex: 1 1 8px;
     min-width: 0;
+}
+
+.consumer-activity-overlay,
+.consumer-log-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100011;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+    pointer-events: auto;
+}
+
+.consumer-activity-backdrop,
+.consumer-log-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.consumer-activity-overlay .custom-alert.consumer-activity-modal,
+.consumer-log-overlay .custom-alert.consumer-log-modal {
+    position: relative;
+    display: block;
+    left: auto;
+    top: auto;
+    transform: none;
+    width: min(420px, calc(100vw - 24px));
+    z-index: 1;
+    margin: 0;
+}
+
+.consumer-log-overlay .custom-alert.consumer-log-modal {
+    width: min(640px, calc(100vw - 24px));
+}
+
+.consumer-activity-message {
+    margin: 8px 0 12px;
+    color: var(--color-text-muted);
+    font-size: var(--ui-fs-small);
+    line-height: 1.45;
+}
+
+.consumer-activity-spinner {
+    width: 28px;
+    height: 28px;
+    margin: 0 auto 12px;
+    border: 3px solid var(--color-border);
+    border-top-color: var(--color-accent, #0d6efd);
+    border-radius: 50%;
+    animation: consumer-activity-spin 0.8s linear infinite;
+}
+
+@keyframes consumer-activity-spin {
+    to { transform: rotate(360deg); }
+}
+
+.consumer-activity-actions,
+.consumer-log-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: stretch;
+    margin-top: 8px;
+}
+
+.consumer-activity-actions .btn-secondary,
+.consumer-activity-actions .btn-danger,
+.consumer-log-actions .btn-primary,
+.consumer-log-actions .btn-danger {
+    flex: 1 1 140px;
+    min-width: 0;
+}
+
+.consumer-log-body {
+    display: block;
+    max-height: min(50vh, 360px);
+    overflow: auto;
+    margin: 8px 0 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-soft);
+    color: var(--color-text);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .consumer-idle-overlay {

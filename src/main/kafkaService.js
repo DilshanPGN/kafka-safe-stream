@@ -59,6 +59,11 @@ function sendConsumeDone(opId) {
     progressWindow.webContents.send('kafka:consume-done', { opId });
 }
 
+function sendConsumeLog(opId, entry) {
+    if (!progressWindow || progressWindow.isDestroyed()) return;
+    progressWindow.webContents.send('kafka:consume-log', { opId, entry });
+}
+
 function hasAnyKafkaSecret(secrets) {
     if (!secrets || typeof secrets !== 'object') return false;
     return Boolean(
@@ -318,7 +323,11 @@ async function handleConsumeStart(ctx, opId, options) {
     activeConsumeOpId = opId;
     const { client } = getOrCreateClient(ctx);
     sendProgress(opId, { phase: 'consume', current: 0, total: 1, message: 'Starting consumer…' });
-    consumeMessages(client, options, (msg) => {
+    const consumeOptions = {
+        ...options,
+        onLog: (entry) => sendConsumeLog(opId, entry),
+    };
+    consumeMessages(client, consumeOptions, (msg) => {
         sendConsumeMessage(opId, msg);
     }, () => {
         activeConsumeOpId = null;

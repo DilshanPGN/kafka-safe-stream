@@ -41,6 +41,7 @@ function ensureIpcListeners() {
         consumeMessageHandler = null;
         consumeDoneHandler = null;
         consumeErrorHandler = null;
+        consumeLogHandler = null;
         if (typeof done === 'function') done();
     });
 
@@ -51,8 +52,16 @@ function ensureIpcListeners() {
         consumeMessageHandler = null;
         consumeDoneHandler = null;
         consumeErrorHandler = null;
+        consumeLogHandler = null;
         if (typeof errHandler === 'function') {
             errHandler(new Error(payload.error || 'Consumer error'));
+        }
+    });
+
+    ipcRenderer.on('kafka:consume-log', (_event, payload) => {
+        if (!payload || payload.opId !== consumeOpId) return;
+        if (typeof consumeLogHandler === 'function') {
+            consumeLogHandler(payload.entry);
         }
     });
 }
@@ -241,13 +250,15 @@ let consumeOpId = null;
 let consumeMessageHandler = null;
 let consumeDoneHandler = null;
 let consumeErrorHandler = null;
+let consumeLogHandler = null;
 
-async function consumeMessages(ctx, options, onMessage, onDone, onError) {
+async function consumeMessages(ctx, options, onMessage, onDone, onError, onLog) {
     ensureIpcListeners();
     consumeOpId = nextOpId();
     consumeMessageHandler = onMessage;
     consumeDoneHandler = onDone;
     consumeErrorHandler = onError;
+    consumeLogHandler = onLog;
     return invokeKafka('kafka:consume-start', { opId: consumeOpId, ctx, options });
 }
 
@@ -256,6 +267,7 @@ async function stopConsuming() {
     consumeMessageHandler = null;
     consumeDoneHandler = null;
     consumeErrorHandler = null;
+    consumeLogHandler = null;
     return invokeKafka('kafka:consume-stop', {});
 }
 
